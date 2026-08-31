@@ -14,6 +14,19 @@ const path = require("path");
 const pool = require("./db");
 const { sendRegistrationCredentials, sendPasswordRecovery } = require("./mailer");
 
+const decodeLegacyHtmlEntities = (value) => {
+  if (typeof value !== "string") return value;
+  const entities = {
+    amp: "&", aacute: "\u00e1", eacute: "\u00e9", iacute: "\u00ed", oacute: "\u00f3", uacute: "\u00fa",
+    Aacute: "\u00c1", Eacute: "\u00c9", Iacute: "\u00cd", Oacute: "\u00d3", Uacute: "\u00da",
+    ntilde: "\u00f1", Ntilde: "\u00d1", uuml: "\u00fc", Uuml: "\u00dc",
+  };
+  return value
+    .replace(/&iacutestica/gi, "\u00edstica")
+    .replace(/&([A-Za-z]+);/g, (match, entity) => entities[entity] ?? match)
+    .trim();
+};
+
 const app = express();
 const uploadsRoot = path.resolve(__dirname, "../uploads");
 const temporaryUploads = path.join(uploadsRoot, "tmp");
@@ -252,7 +265,10 @@ app.get("/api/mis-registros", requireAuth, async (req, res, next) => {
        ORDER BY d.fecha_registro DESC, d.id_pts DESC`,
       [owner.email],
     );
-    res.status(200).json({ success: true, data: rows.map((row) => ({ ...row, actual: row.clave === req.auth.clave })) });
+    res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({ ...row, giro: decodeLegacyHtmlEntities(row.giro), actual: row.clave === req.auth.clave })),
+    });
   } catch (error) {
     next(error);
   }
@@ -368,12 +384,12 @@ app.put("/api/form/datos-generales", requireAuth, async (req, res, next) => {
     return res.status(400).json({ success: false, message: "Completa todos los campos obligatorios" });
   }
   const tipoPersona = Number.parseInt(req.body.tipo_persona, 10);
-  const subrubro = Number.parseInt(req.body.idgiro_subrubro, 10);
+  const requestedSubrubro = Number.parseInt(req.body.idgiro_subrubro, 10);
   const latitud = Number(req.body.latitud);
   const rawLongitud = Number(req.body.longitud);
   const longitud = rawLongitud > 0 ? -rawLongitud : rawLongitud;
-  if (![1, 2].includes(tipoPersona) || !Number.isInteger(subrubro)) {
-    return res.status(400).json({ success: false, message: "Selecciona el tipo de persona y subrubro" });
+  if (![1, 2].includes(tipoPersona)) {
+    return res.status(400).json({ success: false, message: "Selecciona un tipo de persona válido" });
   }
   const accepted = (name) => req.body[name] === true || req.body[name] === 1 || req.body[name] === "1";
   if (!accepted("protesto_juridico") || !accepted("aviso_descripcion")) {
@@ -383,13 +399,19 @@ app.put("/api/form/datos-generales", requireAuth, async (req, res, next) => {
     return res.status(400).json({ success: false, message: "Selecciona una ubicación válida en el mapa" });
   }
   try {
-    const [[validSubrubro]] = await pool.execute(
+    const [availableSubrubros] = await pool.execute(
       `SELECT s.idgiro_subrubro FROM ret_giro_subrubro s
        JOIN ret_datos_generales d ON d.giro = s.id_giro
-       WHERE d.clave = ? AND s.idgiro_subrubro = ? LIMIT 1`,
-      [req.auth.clave, subrubro],
+       WHERE d.clave = ?`,
+      [req.auth.clave],
     );
-    if (!validSubrubro) return res.status(400).json({ success: false, message: "El subrubro no corresponde al giro" });
+    const hasSubrubros = availableSubrubros.length > 0;
+    const validSubrubro = hasSubrubros && Number.isInteger(requestedSubrubro) &&
+      availableSubrubros.some((item) => Number(item.idgiro_subrubro) === requestedSubrubro);
+    if (hasSubrubros && !validSubrubro) {
+      return res.status(400).json({ success: false, message: "Selecciona un subrubro válido para el giro" });
+    }
+    const subrubro = hasSubrubros ? requestedSubrubro : 0;
     const bool = (name) => req.body[name] === true || req.body[name] === 1 || req.body[name] === "1" ? 1 : 0;
     await pool.execute(
       `UPDATE ret_datos_generales SET
@@ -1334,10 +1356,425 @@ app.put("/api/form/auxturistico", requireAuth, async (req, res, next) => {
   }
 });
 
+const BALNEARIOS_HORARIOS = Object.freeze(["hor_mat", "hor_vesp", "hor_diur"]);
+const BALNEARIOS_SERVICIOS = Object.freeze(Array.from({ length: 36 }, (_, index) => `serv${String(index + 1).padStart(2, "0")}`));
+const BALNEARIOS_PAGOS = Object.freeze(Array.from({ length: 6 }, (_, index) => `tc${String(index + 1).padStart(2, "0")}`));
+const BALNEARIOS_CHECKBOXES = Object.freeze([...BALNEARIOS_HORARIOS, ...BALNEARIOS_SERVICIOS, ...BALNEARIOS_PAGOS]);
+
+app.get("/api/form/balnearios", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = BALNEARIOS_CHECKBOXES.map((field) => `b.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, b.capacidad, b.alberca, b.chapoteadero, b.tobogan,
+              b.estacionamiento, b.apertura, b.material, b.medios, b.serv_otro,
+              b.otra_tc, b.porcentaje_registro
+       FROM ret_frm_balnearios b JOIN ret_datos_generales d ON d.clave = b.clave
+       WHERE b.clave = ? AND d.giro = 12 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de balnearios y parques acuáticos" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/form/balnearios", requireAuth, async (req, res, next) => {
+  const checkboxValues = BALNEARIOS_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const shortNumber = (field) => String(req.body[field] ?? "").trim();
+  const capacidad = shortNumber("capacidad");
+  const alberca = shortNumber("alberca");
+  const chapoteadero = shortNumber("chapoteadero");
+  const tobogan = shortNumber("tobogan");
+  const estacionamiento = shortNumber("estacionamiento");
+  const apertura = String(req.body.apertura || "").trim();
+  const material = String(req.body.material || "").trim();
+  const medios = String(req.body.medios || "").trim();
+  const servOtro = String(req.body.serv_otro || "").trim();
+  const otraTc = String(req.body.otra_tc || "").trim();
+  const numericFields = [capacidad, alberca, chapoteadero, tobogan, estacionamiento];
+  if (numericFields.some((value) => !/^\d{1,10}$/.test(value))) return res.status(400).json({ success: false, message: "Captura cantidades válidas de hasta 10 dígitos" });
+  if (!apertura || apertura.length > 15) return res.status(400).json({ success: false, message: "Captura la apertura al público en hasta 15 caracteres" });
+  if (!material || material.length > 5000 || !medios || medios.length > 5000) return res.status(400).json({ success: false, message: "Describe el material promocional y los medios de publicidad" });
+  if (servOtro.length > 5000) return res.status(400).json({ success: false, message: "Otros servicios no debe superar 5000 caracteres" });
+  if (otraTc.length > 120) return res.status(400).json({ success: false, message: "La otra forma de pago no debe superar 120 caracteres" });
+  const serviceOffset = BALNEARIOS_HORARIOS.length;
+  const paymentOffset = serviceOffset + BALNEARIOS_SERVICIOS.length;
+  if (!checkboxValues.slice(0, serviceOffset).some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos un horario" });
+  if (!checkboxValues.slice(serviceOffset, paymentOffset).some(Boolean) && !servOtro) return res.status(400).json({ success: false, message: "Selecciona o captura al menos un servicio" });
+  if (!checkboxValues.slice(paymentOffset).some(Boolean) && !otraTc) return res.status(400).json({ success: false, message: "Selecciona o captura al menos una forma de pago" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 12) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Balnearios y/o Parques Acuáticos" });
+    }
+    const checkboxAssignments = BALNEARIOS_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE ret_frm_balnearios SET ${checkboxAssignments}, capacidad = ?, alberca = ?, chapoteadero = ?,
+       tobogan = ?, estacionamiento = ?, apertura = ?, material = ?, medios = ?, serv_otro = ?,
+       otra_tc = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, capacidad, alberca, chapoteadero, tobogan, estacionamiento, apertura,
+        material, medios, servOtro || null, otraTc || null, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de balnearios y parques acuáticos" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de balnearios y parques acuáticos guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+const CAPACITACION_SERVICIOS = Object.freeze(Array.from({ length: 16 }, (_, index) => `serv${String(index + 1).padStart(2, "0")}`));
+const CAPACITACION_PAGOS = Object.freeze(Array.from({ length: 6 }, (_, index) => `tc${String(index + 1).padStart(2, "0")}`));
+const CAPACITACION_CHECKBOXES = Object.freeze([...CAPACITACION_SERVICIOS, ...CAPACITACION_PAGOS]);
+
+app.get("/api/form/capacitacion", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = CAPACITACION_CHECKBOXES.map((field) => `c.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, c.horario, c.asociaciones, c.certificaciones, c.matricula,
+              c.nopersonas, c.otra_tc, c.porcentaje_registro
+       FROM ret_frm_capacitacion c JOIN ret_datos_generales d ON d.clave = c.clave
+       WHERE c.clave = ? AND d.giro = 13 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de capacitación turística" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/form/capacitacion", requireAuth, async (req, res, next) => {
+  const checkboxValues = CAPACITACION_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const horario = String(req.body.horario || "").trim();
+  const asociaciones = String(req.body.asociaciones || "").trim();
+  const certificaciones = String(req.body.certificaciones || "").trim();
+  const matricula = String(req.body.matricula || "").trim();
+  const noPersonas = String(req.body.nopersonas ?? "").trim();
+  const otraTc = String(req.body.otra_tc || "").trim();
+  if (!horario || horario.length > 120) return res.status(400).json({ success: false, message: "Captura un horario de servicio de hasta 120 caracteres" });
+  if (!asociaciones || asociaciones.length > 5000 || !certificaciones || certificaciones.length > 5000 || !matricula || matricula.length > 5000) {
+    return res.status(400).json({ success: false, message: "Completa asociaciones, certificaciones y matrícula" });
+  }
+  if (!/^\d{1,10}$/.test(noPersonas)) return res.status(400).json({ success: false, message: "Captura un número válido de personas capacitadoras" });
+  if (otraTc.length > 120) return res.status(400).json({ success: false, message: "La otra forma de pago no debe superar 120 caracteres" });
+  if (!checkboxValues.slice(0, CAPACITACION_SERVICIOS.length).some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos un registro, modalidad o servicio" });
+  if (!checkboxValues.slice(CAPACITACION_SERVICIOS.length).some(Boolean) && !otraTc) return res.status(400).json({ success: false, message: "Selecciona o captura al menos una forma de pago" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 13) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Capacitación Turística" });
+    }
+    const checkboxAssignments = CAPACITACION_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE ret_frm_capacitacion SET ${checkboxAssignments}, horario = ?, asociaciones = ?, certificaciones = ?,
+       matricula = ?, nopersonas = ?, otra_tc = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, horario, asociaciones, certificaciones, matricula, noPersonas, otraTc || null, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de capacitación turística" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de capacitación turística guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+const DEPORTE_MODALIDADES = Object.freeze(["pesca", "rancho", "deporte", "recreacion"]);
+const DEPORTE_SERVICIOS = Object.freeze(Array.from({ length: 46 }, (_, index) => `serv${String(index + 1).padStart(2, "0")}`));
+const DEPORTE_CAZA = Object.freeze(Array.from({ length: 86 }, (_, index) => `caza${String(index + 1).padStart(2, "0")}`));
+const DEPORTE_PAGOS = Object.freeze(Array.from({ length: 6 }, (_, index) => `tc${String(index + 1).padStart(2, "0")}`));
+const DEPORTE_CHECKBOXES = Object.freeze([...DEPORTE_MODALIDADES, ...DEPORTE_SERVICIOS, ...DEPORTE_CAZA, ...DEPORTE_PAGOS]);
+
+app.get("/api/form/deporte", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = DEPORTE_CHECKBOXES.map((field) => `f.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, f.detalle, f.superficie, f.nopersonas, f.otrostxt,
+              f.otra_tc, f.porcentaje_registro
+       FROM ret_frm_deporte f JOIN ret_datos_generales d ON d.clave = f.clave
+       WHERE f.clave = ? AND d.giro = 14 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de deporte y recreación" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) { next(error); }
+});
+
+app.put("/api/form/deporte", requireAuth, async (req, res, next) => {
+  const checkboxValues = DEPORTE_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const detalle = String(req.body.detalle || "").trim();
+  const superficie = String(req.body.superficie || "").trim();
+  const noPersonas = String(req.body.nopersonas ?? "").trim();
+  const otros = String(req.body.otrostxt || "").trim();
+  const otraTc = String(req.body.otra_tc || "").trim();
+  if (!detalle || detalle.length > 5000) return res.status(400).json({ success: false, message: "Detalla la actividad en hasta 5000 caracteres" });
+  if (!/^\d{1,10}(?:\.\d{1,2})?$/.test(superficie)) return res.status(400).json({ success: false, message: "Captura una superficie válida" });
+  if (!/^\d{1,10}$/.test(noPersonas)) return res.status(400).json({ success: false, message: "Captura un número válido de personas capacitadoras" });
+  if (otros.length > 5000 || otraTc.length > 120) return res.status(400).json({ success: false, message: "Revisa la longitud de otros servicios y otra forma de pago" });
+  const servicesOffset = DEPORTE_MODALIDADES.length;
+  const huntingOffset = servicesOffset + DEPORTE_SERVICIOS.length;
+  const paymentsOffset = huntingOffset + DEPORTE_CAZA.length;
+  if (!checkboxValues.slice(0, servicesOffset).some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos una modalidad de actividad" });
+  if (!checkboxValues.slice(servicesOffset, huntingOffset).some(Boolean) && !otros) return res.status(400).json({ success: false, message: "Selecciona o captura al menos un servicio" });
+  if (!checkboxValues.slice(paymentsOffset).some(Boolean) && !otraTc) return res.status(400).json({ success: false, message: "Selecciona o captura al menos una forma de pago" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 14) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Deporte y Recreación" });
+    }
+    const checkboxAssignments = DEPORTE_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE ret_frm_deporte SET ${checkboxAssignments}, detalle = ?, superficie = ?, nopersonas = ?,
+       otrostxt = ?, otra_tc = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, detalle, superficie, noPersonas, otros || null, otraTc || null, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de deporte y recreación" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de deporte y recreación guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally { if (connection) connection.release(); }
+});
+
+const SPA_SERVICIOS = Object.freeze(Array.from({ length: 41 }, (_, index) => `serv${String(index + 1).padStart(2, "0")}`));
+const SPA_PAGOS = Object.freeze(Array.from({ length: 6 }, (_, index) => `tc${String(index + 1).padStart(2, "0")}`));
+const SPA_CHECKBOXES = Object.freeze([...SPA_SERVICIOS, ...SPA_PAGOS]);
+
+app.get("/api/form/spa", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = SPA_CHECKBOXES.map((field) => `s.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, s.horario, s.serv_otro, s.otra_tc, s.porcentaje_registro
+       FROM ret_frm_spa s JOIN ret_datos_generales d ON d.clave = s.clave
+       WHERE s.clave = ? AND d.giro = 15 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de SPA" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) { next(error); }
+});
+
+app.put("/api/form/spa", requireAuth, async (req, res, next) => {
+  const checkboxValues = SPA_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const horario = String(req.body.horario || "").trim();
+  const servOtro = String(req.body.serv_otro || "").trim();
+  const otraTc = String(req.body.otra_tc || "").trim();
+  if (!horario || horario.length > 120) return res.status(400).json({ success: false, message: "Captura un horario de servicio de hasta 120 caracteres" });
+  if (servOtro.length > 5000) return res.status(400).json({ success: false, message: "Otros servicios no debe superar 5000 caracteres" });
+  if (otraTc.length > 120) return res.status(400).json({ success: false, message: "La otra forma de pago no debe superar 120 caracteres" });
+  if (!checkboxValues.slice(0, SPA_SERVICIOS.length).some(Boolean) && !servOtro) return res.status(400).json({ success: false, message: "Selecciona o captura al menos un servicio" });
+  if (!checkboxValues.slice(SPA_SERVICIOS.length).some(Boolean) && !otraTc) return res.status(400).json({ success: false, message: "Selecciona o captura al menos una forma de pago" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 15) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Centros de Bienestar" });
+    }
+    const checkboxAssignments = SPA_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE ret_frm_spa SET ${checkboxAssignments}, horario = ?, serv_otro = ?, otra_tc = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, horario, servOtro || null, otraTc || null, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de SPA" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de SPA guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally { if (connection) connection.release(); }
+});
+
+const RECINTO_MODALIDADES = Object.freeze(["Centros de Congresos y Exposiciones", "Congresos y Exposiciones en Hotel"]);
+const RECINTO_SERVICIOS = Object.freeze(Array.from({ length: 35 }, (_, index) => `serv${String(index + 1).padStart(2, "0")}`));
+const RECINTO_PAGOS = Object.freeze(Array.from({ length: 6 }, (_, index) => `tc${String(index + 1).padStart(2, "0")}`));
+const RECINTO_CHECKBOXES = Object.freeze([...RECINTO_SERVICIOS, ...RECINTO_PAGOS]);
+
+app.get("/api/form/recinto", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = RECINTO_CHECKBOXES.map((field) => `r.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, r.horario, r.modalidad, r.otra_tc, r.porcentaje_registro
+       FROM ret_frm_recinto r JOIN ret_datos_generales d ON d.clave = r.clave
+       WHERE r.clave = ? AND d.giro = 16 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de recintos y salones para eventos" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) { next(error); }
+});
+
+app.put("/api/form/recinto", requireAuth, async (req, res, next) => {
+  const checkboxValues = RECINTO_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const horario = String(req.body.horario || "").trim();
+  const modalidad = String(req.body.modalidad || "").trim();
+  const otraTc = String(req.body.otra_tc || "").trim();
+  if (!horario || horario.length > 120) return res.status(400).json({ success: false, message: "Captura un horario de servicio de hasta 120 caracteres" });
+  if (!RECINTO_MODALIDADES.includes(modalidad)) return res.status(400).json({ success: false, message: "Selecciona una modalidad válida" });
+  if (otraTc.length > 120) return res.status(400).json({ success: false, message: "La otra forma de pago no debe superar 120 caracteres" });
+  if (!checkboxValues.slice(0, RECINTO_SERVICIOS.length).some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos un servicio" });
+  if (!checkboxValues.slice(RECINTO_SERVICIOS.length).some(Boolean) && !otraTc) return res.status(400).json({ success: false, message: "Selecciona o captura al menos una forma de pago" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 16) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Recintos, Auditorios, Conservatorios y Salones para eventos" });
+    }
+    const checkboxAssignments = RECINTO_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE ret_frm_recinto SET ${checkboxAssignments}, horario = ?, modalidad = ?, otra_tc = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, horario, modalidad, otraTc || null, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de recintos y salones para eventos" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de recintos y salones para eventos guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally { if (connection) connection.release(); }
+});
+
+const DIGITAL_PLATAFORMAS = Object.freeze(["airbnb", "kayak", "booking", "tripadvisor", "trivago", "otrap"]);
+const DIGITAL_HABITACION = Object.freeze(["cocineta", "tv", "cajafuerte", "cocinetaparcial", "cable", "jacuzzi", "aireacondicionado", "telefono", "aguacaliente", "ventilador", "minibar"]);
+const DIGITAL_COMUNES = Object.freeze(["cafeteria", "bar", "acceso", "restaurante", "boutique", "agencia", "cocinaindustrial", "regalo", "spa", "banquete", "tabaqueria", "room", "salon", "internet", "floreria", "alberca", "sala", "arrendadora", "chapoteadero", "gimnasio", "golf", "area", "lavanderia", "tenis", "juego", "tintoreria", "ejecutivo", "actividad", "elevador", "estacionamiento"]);
+const DIGITAL_CERTIFICACIONES = Object.freeze(["h", "m", "tesoros", "iso", "puntolimpio", "anfitrion", "estandares", "otro"]);
+const DIGITAL_CHECKBOXES = Object.freeze([...DIGITAL_PLATAFORMAS, ...DIGITAL_HABITACION, ...DIGITAL_COMUNES, ...DIGITAL_CERTIFICACIONES]);
+
+app.get("/api/form/hospedaje-digital", requireAuth, async (req, res, next) => {
+  try {
+    const checkboxColumns = DIGITAL_CHECKBOXES.map((field) => `h.\`${field}\``).join(", ");
+    const [[row]] = await pool.query(
+      `SELECT ${checkboxColumns}, h.categoria, h.establecimiento, h.cuartos, h.pisos, h.otradigital,
+              h.otracertificacion, h.nocajon, h.tipocajon, h.seguro, h.aseguradora, h.unidad,
+              h.porcentaje_registro
+       FROM \`ret_frm_hospedaje-digitales\` h JOIN ret_datos_generales d ON d.clave = h.clave
+       WHERE h.clave = ? AND d.giro = 17 LIMIT 1`,
+      [req.auth.clave],
+    );
+    if (!row) return res.status(404).json({ success: false, message: "No se encontró el formulario de hospedaje digital" });
+    res.status(200).json({ success: true, data: row });
+  } catch (error) { next(error); }
+});
+
+app.put("/api/form/hospedaje-digital", requireAuth, async (req, res, next) => {
+  const checkboxValues = DIGITAL_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
+  const categoria = Number.parseInt(req.body.categoria, 10);
+  const establecimiento = String(req.body.establecimiento || "").trim();
+  const cuartos = Number.parseInt(req.body.cuartos, 10);
+  const camas = Number.parseInt(req.body.pisos, 10);
+  const otraDigital = String(req.body.otradigital || "").trim();
+  const otraCertificacion = String(req.body.otracertificacion || "").trim();
+  const noCajon = Number.parseInt(req.body.nocajon, 10);
+  const tipoCajon = String(req.body.tipocajon || "").trim();
+  const seguro = Number.parseInt(req.body.seguro, 10);
+  const aseguradora = String(req.body.aseguradora || "").trim();
+  const unidad = Number.parseInt(req.body.unidad, 10);
+  if (![1, 2, 3].includes(categoria)) return res.status(400).json({ success: false, message: "Selecciona un tipo de alojamiento válido" });
+  if (!establecimiento || establecimiento.length > 50) return res.status(400).json({ success: false, message: "Captura el alojamiento que se ofrece" });
+  if (!Number.isInteger(cuartos) || cuartos < 1 || cuartos > 999 || !Number.isInteger(camas) || camas < 1 || camas > 99) return res.status(400).json({ success: false, message: "Captura cantidades válidas de habitaciones y camas" });
+  if (!checkboxValues.slice(0, DIGITAL_PLATAFORMAS.length).some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos una plataforma digital" });
+  if (otraDigital.length > 50 || otraCertificacion.length > 50) return res.status(400).json({ success: false, message: "Los campos de otra plataforma o certificación no deben superar 50 caracteres" });
+  if (!Number.isInteger(noCajon) || noCajon < 0 || noCajon > 9999) return res.status(400).json({ success: false, message: "Captura un número válido de cajones" });
+  if (!["Interno", "Externo"].includes(tipoCajon) || ![0, 1].includes(seguro) || ![0, 1].includes(unidad)) return res.status(400).json({ success: false, message: "Revisa la información de estacionamiento, seguro y paraderos" });
+  if (seguro === 1 && (!aseguradora || aseguradora.length > 50)) return res.status(400).json({ success: false, message: "Captura la aseguradora" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[business]] = await connection.execute("SELECT giro FROM ret_datos_generales WHERE clave = ? LIMIT 1 FOR UPDATE", [req.auth.clave]);
+    if (!business || Number(business.giro) !== 17) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "Este formulario corresponde únicamente al giro Hospedaje a través de Plataformas Digitales" });
+    }
+    const checkboxAssignments = DIGITAL_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
+    const [result] = await connection.execute(
+      `UPDATE \`ret_frm_hospedaje-digitales\` SET ${checkboxAssignments}, categoria = ?, establecimiento = ?,
+       cuartos = ?, pisos = ?, otradigital = ?, otracertificacion = ?, nocajon = ?, tipocajon = ?,
+       seguro = ?, aseguradora = ?, unidad = ?, porcentaje_registro = 100 WHERE clave = ?`,
+      [...checkboxValues, categoria, establecimiento, cuartos, camas, otraDigital || null, otraCertificacion || null,
+        noCajon, tipoCajon, seguro, seguro === 1 ? aseguradora : null, unidad, req.auth.clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el formulario de hospedaje digital" });
+    }
+    await connection.execute("UPDATE ret_datos_generales SET concluido = 1, renovar = 0, porcentaje_registro = 80 WHERE clave = ?", [req.auth.clave]);
+    await connection.execute("UPDATE ret_usr SET porcentaje_registro = 80 WHERE id_usr = ?", [req.auth.sub]);
+    await connection.commit();
+    res.status(200).json({ success: true, message: "Formulario de hospedaje digital guardado correctamente" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally { if (connection) connection.release(); }
+});
+
 app.get("/api/giros", async (req, res, next) => {
   try {
     const [rows] = await pool.query("SELECT id_giro, giro, resumen FROM ret_giro ORDER BY id_giro");
-    res.status(200).json({ success: true, data: rows });
+    res.status(200).json({
+      success: true,
+      data: rows.map((row) => ({
+        ...row,
+        giro: decodeLegacyHtmlEntities(row.giro),
+        resumen: decodeLegacyHtmlEntities(row.resumen),
+      })),
+    });
   } catch (error) {
     next(error);
   }
