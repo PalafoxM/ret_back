@@ -315,75 +315,75 @@ app.post("/api/admin/logout", requireAdmin, (req, res) => {
 
 app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
   try {
-    const [[view]] = await pool.execute(
-      `SELECT 1 AS available FROM information_schema.VIEWS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'vw_usr_datos' LIMIT 1`,
-    );
-    const sourceSql = view
-      ? "SELECT * FROM vw_usr_datos"
-      : `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre
-         FROM ret_datos_generales d
-         LEFT JOIN ret_giro g ON g.id_giro = d.giro
-         LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio`;
-    const [rows] = await pool.query(sourceSql);
-    const value = (row, ...keys) => keys.map((key) => row[key]).find((item) => item !== undefined && item !== null);
-    const flag = (row, ...keys) => Number(value(row, ...keys) || 0) === 1;
-    const text = (row, ...keys) => String(value(row, ...keys) || "").trim();
-    const dateValue = (row) => value(row, "fecha_registro", "fec_reg", "fecha", "created_at");
-    const dayKey = (input) => {
-      if (!input) return "";
-      const date = new Date(input);
-      if (Number.isNaN(date.getTime())) return "";
-      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    };
-    const today = new Date();
-    const todayKey = dayKey(today);
-    const isExpired = (row) => {
-      if (flag(row, "vencido")) return true;
-      const status = text(row, "estatus", "status").toLowerCase();
-      if (status.includes("vencid")) return true;
-      const expiration = value(row, "fecha_vencimiento", "fec_vencimiento", "vigencia_hasta");
-      return expiration ? new Date(expiration).getTime() < today.getTime() : false;
-    };
-    const normalized = rows.map((row) => ({
-      clave: text(row, "clave", "clave_ret", "id"),
-      nombre_comercial: text(row, "nombre_comercial", "establecimiento", "nombre"),
-      giro: text(row, "giro_nombre", "nombre_giro", "giro"),
-      municipio: text(row, "municipio_nombre", "nombre_municipio", "municipio"),
-      correo: text(row, "correo", "email"),
-      fecha_registro: dateValue(row),
-      visible: flag(row, "visible"),
-      concluido: flag(row, "concluido"),
-      aprobado: flag(row, "aprobado"),
-      renovar: flag(row, "renovar", "renovacion"),
-      activo: row.activo === undefined ? flag(row, "visible") && !isExpired(row) : flag(row, "activo"),
-      vencido: isExpired(row),
-    }));
-    const visibleRows = normalized.filter((row) => row.visible);
-    const metrics = {
-      activos: normalized.filter((row) => row.activo).length,
-      hoy: normalized.filter((row) => dayKey(row.fecha_registro) === todayKey).length,
-      pendientes: normalized.filter((row) => !row.concluido).length,
-      concluidos: normalized.filter((row) => row.concluido).length,
-      aprobados: normalized.filter((row) => row.aprobado).length,
-      renovaciones: normalized.filter((row) => row.renovar).length,
-      vencidos: normalized.filter((row) => row.vencido).length,
-    };
-    const top = (key) => Object.entries(visibleRows.reduce((items, row) => {
-      const label = row[key] || "Sin especificar";
-      items[label] = (items[label] || 0) + 1;
-      return items;
-    }, {})).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, total]) => ({ label, total }));
+    const [[metricsRows], [byGiro], [byMunicipio], [activityRows]] = await Promise.all([
+      pool.query(`SELECT
+        SUM(visible = 1) AS activos,
+        SUM(DATE(fecha_registro) = CURRENT_DATE()) AS hoy,
+        SUM(COALESCE(concluido, 0) = 0) AS pendientes,
+        SUM(concluido = 1) AS concluidos,
+        SUM(aprobado = 1) AS aprobados,
+        SUM(renovar = 1) AS renovaciones,
+        0 AS vencidos
+        FROM ret_datos_generales`),
+      pool.query(`SELECT COALESCE(g.giro, 'Sin especificar') AS label, COUNT(*) AS total
+        FROM ret_datos_generales d LEFT JOIN ret_giro g ON g.id_giro = d.giro
+        WHERE d.visible = 1 GROUP BY d.giro, g.giro ORDER BY total DESC LIMIT 6`),
+      pool.query(`SELECT COALESCE(m.municipio, 'Sin especificar') AS label, COUNT(*) AS total
+        FROM ret_datos_generales d LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+        WHERE d.visible = 1 GROUP BY d.municipio, m.municipio ORDER BY total DESC LIMIT 6`),
+      pool.query(`SELECT DATE(fecha_registro) AS date, COUNT(*) AS total
+        FROM ret_datos_generales
+        WHERE fecha_registro >= CURRENT_DATE() - INTERVAL 6 DAY
+        GROUP BY DATE(fecha_registro) ORDER BY date`),
+    ]);
+    const activityMap = new Map(activityRows.map((row) => [new Date(row.date).toISOString().slice(0, 10), Number(row.total)]));
     const activity = Array.from({ length: 7 }, (_, index) => {
-      const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (6 - index));
-      const key = dayKey(date);
-      return { date: key, total: normalized.filter((row) => dayKey(row.fecha_registro) === key).length };
+      const date = new Date();
+      date.setHours(12, 0, 0, 0);
+      date.setDate(date.getDate() - (6 - index));
+      const key = date.toISOString().slice(0, 10);
+      return { date: key, total: activityMap.get(key) || 0 };
     });
-    const recent = visibleRows.sort((a, b) => new Date(b.fecha_registro || 0) - new Date(a.fecha_registro || 0)).slice(0, 8).map((row) => ({
-      ...row,
-      estatus: row.vencido ? "Vencido" : row.aprobado ? "Aprobado" : row.renovar ? "Renovación" : row.concluido ? "Concluido" : "Pendiente",
-    }));
-    res.status(200).json({ success: true, data: { metrics, byGiro: top("giro"), byMunicipio: top("municipio"), activity, recent, source: view ? "vw_usr_datos" : "fallback" } });
+    res.status(200).json({ success: true, data: { metrics: metricsRows[0] || {}, byGiro, byMunicipio, activity } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(50, Math.max(5, Number.parseInt(req.query.pageSize, 10) || 10));
+    const search = String(req.query.search || "").trim().slice(0, 100);
+    const status = String(req.query.status || "").trim();
+    const statusClauses = {
+      Pendiente: "COALESCE(d.concluido, 0) = 0",
+      Concluido: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0",
+      Aprobado: "d.aprobado = 1",
+      "Renovación": "d.renovar = 1",
+    };
+    const filters = ["d.visible = 1"];
+    const params = [];
+    if (search) {
+      filters.push("(d.clave LIKE ? OR d.nombre_comercial LIKE ? OR d.correo LIKE ? OR g.giro LIKE ? OR m.municipio LIKE ?)");
+      const term = `%${search}%`;
+      params.push(term, term, term, term, term);
+    }
+    if (statusClauses[status]) filters.push(statusClauses[status]);
+    const fromSql = `FROM ret_datos_generales d
+      LEFT JOIN ret_giro g ON g.id_giro = d.giro
+      LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+      WHERE ${filters.join(" AND ")}`;
+    const offset = (page - 1) * pageSize;
+    const [[countRows], [rows]] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
+      pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro,
+        g.giro, m.municipio,
+        CASE WHEN d.aprobado = 1 THEN 'Aprobado'
+          WHEN d.renovar = 1 THEN 'Renovación'
+          WHEN d.concluido = 1 THEN 'Concluido' ELSE 'Pendiente' END AS estatus
+        ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
+    ]);
+    const total = Number(countRows[0]?.total || 0);
+    res.status(200).json({ success: true, data: { rows, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) } });
   } catch (error) { next(error); }
 });
 
