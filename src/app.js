@@ -77,6 +77,39 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(morgan("dev"));
 
+const CSRF_COOKIE = "ret_csrf";
+const csrfCookieOptions = () => ({
+  httpOnly: false,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "strict",
+  path: "/",
+  maxAge: 8 * 60 * 60 * 1000,
+});
+const validCsrfToken = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+app.get("/api/auth/csrf", (req, res) => {
+  const currentToken = req.cookies[CSRF_COOKIE];
+  const token = validCsrfToken(currentToken) ? currentToken : crypto.randomBytes(32).toString("hex");
+  res.cookie(CSRF_COOKIE, token, csrfCookieOptions());
+  res.set("Cache-Control", "no-store");
+  res.status(200).json({ success: true, data: { csrfToken: token } });
+});
+
+app.use("/api", (req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  const cookieToken = req.cookies[CSRF_COOKIE];
+  const headerToken = req.get("x-csrf-token");
+  if (!validCsrfToken(cookieToken) || !validCsrfToken(headerToken)) {
+    return res.status(403).json({ success: false, message: "La validación de seguridad expiró. Recarga la página e intenta nuevamente" });
+  }
+  const cookieBuffer = Buffer.from(cookieToken, "hex");
+  const headerBuffer = Buffer.from(headerToken, "hex");
+  if (cookieBuffer.length !== headerBuffer.length || !crypto.timingSafeEqual(cookieBuffer, headerBuffer)) {
+    return res.status(403).json({ success: false, message: "La validación de seguridad no es válida" });
+  }
+  next();
+});
+
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     success: true,
@@ -85,6 +118,7 @@ app.get("/api/health", (req, res) => {
 });
 
 const SESSION_COOKIE = "ret_session";
+const ADMIN_SESSION_COOKIE = "ret_admin_session";
 const getJwtSecret = () => {
   const secret = process.env.JWT_SECRET;
   return typeof secret === "string" && secret.length >= 32 ? secret : null;
@@ -106,6 +140,22 @@ const requireAuth = (req, res, next) => {
   }
 };
 
+const requireAdmin = (req, res, next) => {
+  const secret = getJwtSecret();
+  if (!secret) return res.status(503).json({ success: false, message: "La autenticación no está configurada" });
+  const token = req.cookies[ADMIN_SESSION_COOKIE];
+  if (!token) return res.status(401).json({ success: false, message: "Sesión administrativa requerida" });
+  try {
+    const payload = jwt.verify(token, secret, { algorithms: ["HS256"], issuer: "ret-api", audience: "ret-admin" });
+    if (payload.role !== "admin") throw new Error("Invalid admin role");
+    req.admin = payload;
+    next();
+  } catch {
+    res.clearCookie(ADMIN_SESSION_COOKIE, { path: "/" });
+    return res.status(401).json({ success: false, message: "La sesión administrativa expiró o no es válida" });
+  }
+};
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
@@ -115,12 +165,37 @@ const loginLimiter = rateLimit({
   message: { success: false, message: "Demasiados intentos. Intenta nuevamente en 15 minutos" },
 });
 
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { success: false, message: "Demasiados intentos administrativos. Intenta nuevamente en 15 minutos" },
+});
+
 const recoveryLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 3,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: { success: false, message: "Demasiadas solicitudes de recuperación. Intenta nuevamente más tarde" },
+});
+
+const registrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { success: false, message: "Demasiados intentos de registro. Intenta nuevamente más tarde" },
+});
+
+const publicMapLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { success: false, message: "Demasiadas consultas. Intenta nuevamente en un momento" },
 });
 
 app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
@@ -184,6 +259,132 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.post("/api/admin/login", adminLoginLimiter, async (req, res, next) => {
+  const secret = getJwtSecret();
+  if (!secret) return res.status(503).json({ success: false, message: "La autenticación no está configurada" });
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255 || !password || password.length > 128) {
+    return res.status(401).json({ success: false, message: "Correo o contraseña incorrectos" });
+  }
+  try {
+    const [[admin]] = await pool.execute(
+      "SELECT user_id, email, password, name, role, status FROM `user` WHERE LOWER(email) = ? LIMIT 1",
+      [email],
+    );
+    if (!admin || admin.role !== "admin" || Number(admin.status) !== 1) {
+      return res.status(401).json({ success: false, message: "Correo o contraseña incorrectos" });
+    }
+    const usesBcrypt = /^\$2[aby]\$/.test(admin.password || "");
+    let passwordMatches = false;
+    if (usesBcrypt) passwordMatches = await bcrypt.compare(password, admin.password);
+    else if (/^[a-f0-9]{32}$/i.test(admin.password || "")) {
+      const legacyHash = crypto.createHash("md5").update(password).digest("hex");
+      passwordMatches = crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(admin.password.toLowerCase()));
+    }
+    if (!passwordMatches) return res.status(401).json({ success: false, message: "Correo o contraseña incorrectos" });
+    if (!usesBcrypt) {
+      const upgradedHash = await bcrypt.hash(password, 12);
+      await pool.execute("UPDATE `user` SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", [upgradedHash, admin.user_id]);
+    }
+    const maxAge = 4 * 60 * 60 * 1000;
+    const token = jwt.sign(
+      { sub: String(admin.user_id), role: "admin", email: admin.email, name: admin.name || "Administrador" },
+      secret,
+      { algorithm: "HS256", expiresIn: Math.floor(maxAge / 1000), issuer: "ret-api", audience: "ret-admin", jwtid: crypto.randomUUID() },
+    );
+    res.cookie(ADMIN_SESSION_COOKIE, token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/", maxAge });
+    res.status(200).json({ success: true, data: { email: admin.email, name: admin.name || "Administrador", role: "admin", session_expires_at: Date.now() + maxAge } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/me", requireAdmin, async (req, res, next) => {
+  try {
+    const [[admin]] = await pool.execute("SELECT email, name, role, status FROM `user` WHERE user_id = ? LIMIT 1", [req.admin.sub]);
+    if (!admin || admin.role !== "admin" || Number(admin.status) !== 1) return res.status(401).json({ success: false, message: "La cuenta administrativa no está activa" });
+    res.status(200).json({ success: true, data: { email: admin.email, name: admin.name || "Administrador", role: admin.role, session_expires_at: Number(req.admin.exp) * 1000 } });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/logout", requireAdmin, (req, res) => {
+  res.clearCookie(ADMIN_SESSION_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/" });
+  res.status(200).json({ success: true });
+});
+
+app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
+  try {
+    const [[view]] = await pool.execute(
+      `SELECT 1 AS available FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'vw_usr_datos' LIMIT 1`,
+    );
+    const sourceSql = view
+      ? "SELECT * FROM vw_usr_datos"
+      : `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre
+         FROM ret_datos_generales d
+         LEFT JOIN ret_giro g ON g.id_giro = d.giro
+         LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio`;
+    const [rows] = await pool.query(sourceSql);
+    const value = (row, ...keys) => keys.map((key) => row[key]).find((item) => item !== undefined && item !== null);
+    const flag = (row, ...keys) => Number(value(row, ...keys) || 0) === 1;
+    const text = (row, ...keys) => String(value(row, ...keys) || "").trim();
+    const dateValue = (row) => value(row, "fecha_registro", "fec_reg", "fecha", "created_at");
+    const dayKey = (input) => {
+      if (!input) return "";
+      const date = new Date(input);
+      if (Number.isNaN(date.getTime())) return "";
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    };
+    const today = new Date();
+    const todayKey = dayKey(today);
+    const isExpired = (row) => {
+      if (flag(row, "vencido")) return true;
+      const status = text(row, "estatus", "status").toLowerCase();
+      if (status.includes("vencid")) return true;
+      const expiration = value(row, "fecha_vencimiento", "fec_vencimiento", "vigencia_hasta");
+      return expiration ? new Date(expiration).getTime() < today.getTime() : false;
+    };
+    const normalized = rows.map((row) => ({
+      clave: text(row, "clave", "clave_ret", "id"),
+      nombre_comercial: text(row, "nombre_comercial", "establecimiento", "nombre"),
+      giro: text(row, "giro_nombre", "nombre_giro", "giro"),
+      municipio: text(row, "municipio_nombre", "nombre_municipio", "municipio"),
+      correo: text(row, "correo", "email"),
+      fecha_registro: dateValue(row),
+      visible: flag(row, "visible"),
+      concluido: flag(row, "concluido"),
+      aprobado: flag(row, "aprobado"),
+      renovar: flag(row, "renovar", "renovacion"),
+      activo: row.activo === undefined ? flag(row, "visible") && !isExpired(row) : flag(row, "activo"),
+      vencido: isExpired(row),
+    }));
+    const visibleRows = normalized.filter((row) => row.visible);
+    const metrics = {
+      activos: normalized.filter((row) => row.activo).length,
+      hoy: normalized.filter((row) => dayKey(row.fecha_registro) === todayKey).length,
+      pendientes: normalized.filter((row) => !row.concluido).length,
+      concluidos: normalized.filter((row) => row.concluido).length,
+      aprobados: normalized.filter((row) => row.aprobado).length,
+      renovaciones: normalized.filter((row) => row.renovar).length,
+      vencidos: normalized.filter((row) => row.vencido).length,
+    };
+    const top = (key) => Object.entries(visibleRows.reduce((items, row) => {
+      const label = row[key] || "Sin especificar";
+      items[label] = (items[label] || 0) + 1;
+      return items;
+    }, {})).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, total]) => ({ label, total }));
+    const activity = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (6 - index));
+      const key = dayKey(date);
+      return { date: key, total: normalized.filter((row) => dayKey(row.fecha_registro) === key).length };
+    });
+    const recent = visibleRows.sort((a, b) => new Date(b.fecha_registro || 0) - new Date(a.fecha_registro || 0)).slice(0, 8).map((row) => ({
+      ...row,
+      estatus: row.vencido ? "Vencido" : row.aprobado ? "Aprobado" : row.renovar ? "Renovación" : row.concluido ? "Concluido" : "Pendiente",
+    }));
+    res.status(200).json({ success: true, data: { metrics, byGiro: top("giro"), byMunicipio: top("municipio"), activity, recent, source: view ? "vw_usr_datos" : "fallback" } });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
@@ -1766,7 +1967,7 @@ app.put("/api/form/hospedaje-digital", requireAuth, async (req, res, next) => {
 
 app.get("/api/giros", async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT id_giro, giro, resumen FROM ret_giro ORDER BY id_giro");
+    const [rows] = await pool.query("SELECT id_giro, giro, resumen FROM ret_giro WHERE estatus = 1 ORDER BY id_giro");
     res.status(200).json({
       success: true,
       data: rows.map((row) => ({
@@ -1791,34 +1992,7 @@ app.get("/api/municipios", async (req, res, next) => {
   }
 });
 
-const requireEstablecimientoToken = (req, res, next) => {
-  const configuredToken = process.env.TOKEN_ESTABLECIMIENTO;
-  const receivedToken = req.get("x-establecimiento-token");
-
-  if (!configuredToken) {
-    return res.status(503).json({
-      success: false,
-      message: "El servicio de establecimientos no está configurado",
-    });
-  }
-
-  if (!receivedToken) {
-    return res.status(401).json({ success: false, message: "Acceso no autorizado" });
-  }
-
-  const configuredBuffer = Buffer.from(configuredToken);
-  const receivedBuffer = Buffer.from(receivedToken);
-  const isValid = configuredBuffer.length === receivedBuffer.length &&
-    crypto.timingSafeEqual(configuredBuffer, receivedBuffer);
-
-  if (!isValid) {
-    return res.status(403).json({ success: false, message: "Acceso no autorizado" });
-  }
-
-  next();
-};
-
-const requireRegistrationAccess = (req, res, next) => {
+const attachOptionalAuth = (req, res, next) => {
   const token = req.cookies[SESSION_COOKIE];
   const secret = getJwtSecret();
   if (token && secret) {
@@ -1829,7 +2003,7 @@ const requireRegistrationAccess = (req, res, next) => {
       res.clearCookie(SESSION_COOKIE, { path: "/" });
     }
   }
-  return requireEstablecimientoToken(req, res, next);
+  next();
 };
 
 const GIRO_TABLES = Object.freeze({
@@ -1872,7 +2046,7 @@ const generatePassword = () => {
   return Array.from({ length: 12 }, () => alphabet[crypto.randomInt(alphabet.length)]).join("");
 };
 
-app.post("/api/registro", requireRegistrationAccess, async (req, res, next) => {
+app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, res, next) => {
   const rfc = String(req.body.rfc || "").trim().toUpperCase();
   const giro = Number.parseInt(req.body.giro, 10);
   const municipio = Number.parseInt(req.body.municipio, 10);
@@ -2055,7 +2229,7 @@ app.post("/api/form/encuesta", requireAuth, async (req, res, next) => {
   }
 });
 
-app.get("/api/establecimientos", requireEstablecimientoToken, async (req, res, next) => {
+app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
   try {
     const giro = Number.parseInt(req.query.giro || "1", 10);
     if (!Number.isInteger(giro) || giro < 1) {
@@ -2065,7 +2239,9 @@ app.get("/api/establecimientos", requireEstablecimientoToken, async (req, res, n
       "SELECT nombre_comercial, latitud, longitud, descripcion FROM ret_datos_generales WHERE visible = 1 AND giro = ?",
       [giro],
     );
+
     const data = rows
+    
       .map((row) => {
         const latitud = Number(row.latitud);
         const rawLongitud = Number(row.longitud);
