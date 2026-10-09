@@ -185,7 +185,7 @@ const requireAdmin = (req, res, next) => {
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 5,
+  limit: 10,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   skipSuccessfulRequests: true,
@@ -194,7 +194,7 @@ const loginLimiter = rateLimit({
 
 const adminLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 5,
+  limit: 10,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   skipSuccessfulRequests: true,
