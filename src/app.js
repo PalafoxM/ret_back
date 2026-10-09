@@ -15,6 +15,7 @@ const pool = require("./db");
 const { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations } = require("./mailer");
 const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
+const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -617,6 +618,69 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     ]);
     const total = Number(countRows[0]?.total || 0);
     res.status(200).json({ success: true, data: { rows, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/usuarios", requireAdmin, async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(50, Math.max(5, Number.parseInt(req.query.pageSize, 10) || 10));
+    const search = String(req.query.search || "").trim().slice(0, 100);
+    const filters = [];
+    const params = [];
+    if (search) {
+      filters.push("(u.id LIKE ? OR u.email LIKE ? OR d.nombre_comercial LIKE ?)");
+      const term = `%${search}%`;
+      params.push(term, term, term);
+    }
+    const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const fromSql = `FROM ret_usr u LEFT JOIN ret_datos_generales d ON d.clave = u.id ${whereSql}`;
+    const offset = (page - 1) * pageSize;
+    const [[countRows], [rows]] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
+      pool.execute(`SELECT u.id_usr, u.id AS clave, u.email, u.activo, u.id_perfil,
+        u.fecha_registro, u.fecha_renovacion, u.porcentaje_registro, d.nombre_comercial
+        ${fromSql} ORDER BY u.id_usr DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
+    ]);
+    const total = Number(countRows[0]?.total || 0);
+    res.status(200).json({ success: true, data: { rows, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/reportes", requireAdmin, (req, res) => {
+  const reports = [
+    ...Object.entries(STATE_REPORTS).map(([id, report]) => ({ id, title: report.title, category: "Estado del trámite" })),
+    ...Object.entries(APP_REPORTS).map(([id, report]) => ({ id, title: report.title, category: "Aplicación móvil" })),
+  ];
+  res.status(200).json({ success: true, data: reports });
+});
+
+app.get("/api/admin/reportes/:tipo.xlsx", requireAdmin, async (req, res, next) => {
+  try {
+    const type = String(req.params.tipo || "");
+    const report = await queryReport(pool, type);
+    if (!report) return res.status(404).json({ success: false, message: "El reporte solicitado no existe" });
+    const workbook = await buildWorkbook(report);
+    const filename = `RET-${type}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.send(Buffer.from(workbook));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/usuarios/:id/password", requireAdmin, async (req, res, next) => {
+  try {
+    const userId = Number.parseInt(req.params.id, 10);
+    const password = String(req.body.password || "");
+    if (!Number.isInteger(userId) || userId < 1) return res.status(400).json({ success: false, message: "El usuario no es válido" });
+    if (password.length < 12 || password.length > 128 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
+      return res.status(400).json({ success: false, message: "La contraseña debe tener entre 12 y 128 caracteres, mayúscula, minúscula, número y símbolo" });
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    const [result] = await pool.execute("UPDATE ret_usr SET pass = ? WHERE id_usr = ?", [passwordHash, userId]);
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: "No se encontró el usuario" });
+    res.status(200).json({ success: true, message: "Contraseña actualizada correctamente" });
   } catch (error) { next(error); }
 });
 
