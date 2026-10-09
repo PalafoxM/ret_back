@@ -31,6 +31,7 @@ const decodeLegacyHtmlEntities = (value) => {
 };
 
 const app = express();
+app.set("trust proxy", "loopback");
 const uploadsRoot = path.resolve(__dirname, "../uploads");
 const temporaryUploads = path.join(uploadsRoot, "tmp");
 fs.mkdirSync(temporaryUploads, { recursive: true });
