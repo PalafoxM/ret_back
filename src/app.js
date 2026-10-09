@@ -12,7 +12,9 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const pool = require("./db");
-const { sendRegistrationCredentials, sendPasswordRecovery } = require("./mailer");
+const { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations } = require("./mailer");
+const { createApprovalSeal, generateCedulaRet } = require("./cedula");
+const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -31,6 +33,20 @@ const app = express();
 const uploadsRoot = path.resolve(__dirname, "../uploads");
 const temporaryUploads = path.join(uploadsRoot, "tmp");
 fs.mkdirSync(temporaryUploads, { recursive: true });
+const safeDownloadName = (value) => String(value || "archivo").replace(/[^A-Za-z0-9._-]/g, "-");
+const sendStoredObject = async (res, storedPath, filename, inline = false) => {
+  if (isS3Key(storedPath)) {
+    const object = await getS3Object(storedPath);
+    res.setHeader("Content-Type", object.ContentType || "application/octet-stream");
+    res.setHeader("Content-Disposition", `${inline ? "inline" : "attachment"}; filename="${safeDownloadName(filename)}"`);
+    if (object.ContentLength != null) res.setHeader("Content-Length", String(object.ContentLength));
+    if (typeof object.Body?.pipe === "function") return object.Body.pipe(res);
+    return res.send(Buffer.from(await object.Body.transformToByteArray()));
+  }
+  const absolutePath = path.resolve(uploadsRoot, storedPath);
+  if (!absolutePath.startsWith(`${uploadsRoot}${path.sep}`)) throw Object.assign(new Error("Ruta de archivo no válida"), { status: 400 });
+  return inline ? res.sendFile(absolutePath) : res.download(absolutePath, safeDownloadName(filename));
+};
 const legalUpload = multer({
   dest: temporaryUploads,
   limits: { fileSize: 10 * 1024 * 1024, files: 9 },
@@ -313,6 +329,214 @@ app.post("/api/admin/logout", requireAdmin, (req, res) => {
   res.status(200).json({ success: true });
 });
 
+const getCedulaRecord = async (executor, clave, lock = false) => {
+  const [rows] = await executor.execute(
+    `SELECT d.clave, d.nombre_comercial, d.info_rfc, d.rfc_empresa, d.correo,
+      d.calle, d.numero, d.interior, d.colonia, d.cp, d.fecha_registro,
+      d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
+      g.giro, m.municipio, u.email AS cuenta_email
+     FROM ret_datos_generales d
+     LEFT JOIN ret_giro g ON g.id_giro = d.giro
+     LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+     LEFT JOIN ret_archivo_legal a ON a.clave = d.clave
+     LEFT JOIN (SELECT id, MAX(email) AS email FROM ret_usr WHERE activo = 1 GROUP BY id) u ON u.id = d.clave
+     WHERE d.clave = ? LIMIT 1${lock ? " FOR UPDATE" : ""}`,
+    [clave],
+  );
+  if (!rows[0]) return null;
+  const row = rows[0];
+  return {
+    ...row,
+    correo: row.correo || row.cuenta_email || "",
+    rfc: row.info_rfc || row.rfc_empresa || "",
+    domicilio: [row.calle, row.numero, row.interior ? `Int. ${row.interior}` : "", row.colonia, row.cp ? `C.P. ${row.cp}` : ""].filter(Boolean).join(", "),
+  };
+};
+
+app.post("/api/admin/tramites/:clave/aprobar", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
+  let connection;
+  let uploadedCedulaKey = "";
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const record = await getCedulaRecord(connection, clave, true);
+    if (!record) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el registro" });
+    }
+    if (Number(record.concluido) !== 1) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "El usuario debe concluir sus formularios antes de aprobar el registro" });
+    }
+    if (Number(record.aprobado) === 1) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "El registro ya se encuentra aprobado" });
+    }
+    const approvedAt = new Date();
+    const approvalSeal = createApprovalSeal({ clave, approvedAt: approvedAt.toISOString() });
+    const pdf = await generateCedulaRet({ ...record, cadena_aprobacion: approvalSeal, fecha_aprobacion: approvedAt });
+    uploadedCedulaKey = `${S3_PREFIX}/${clave}/cedulas/Cedula-RET-${clave}.pdf`;
+    await putS3Object({ key: uploadedCedulaKey, body: pdf, contentType: "application/pdf", filename: `Cedula-RET-${clave}.pdf` });
+    await connection.execute(
+      `UPDATE ret_datos_generales SET concluido = 1, aprobado = 1, renovar = 0, cadena_aprobacion = ? WHERE clave = ?`,
+      [approvalSeal, clave],
+    );
+    await connection.execute("UPDATE ret_archivo_legal SET cedula_ret = ? WHERE clave = ?", [uploadedCedulaKey, clave]);
+    await connection.commit();
+    let emailSent = false;
+    let emailMessage = "";
+    if (record.correo) {
+      try {
+        await sendApprovalCertificate({ to: record.correo, clave, nombreComercial: record.nombre_comercial, pdf });
+        emailSent = true;
+      } catch (mailError) {
+        emailMessage = "El registro fue aprobado, pero no fue posible enviar el correo";
+        console.error("No fue posible enviar la Cédula RET:", mailError.code || mailError.message);
+      }
+    } else emailMessage = "El registro fue aprobado, pero no tiene un correo asociado";
+    res.status(200).json({ success: true, message: emailSent ? "Registro aprobado y Cédula RET enviada por correo" : emailMessage, data: { clave, emailSent } });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    if (uploadedCedulaKey) await deleteS3Object(uploadedCedulaKey).catch(() => {});
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.get("/api/admin/tramites/:clave/cedula", requireAdmin, async (req, res, next) => {
+  try {
+    const clave = String(req.params.clave || "").trim().toUpperCase();
+    const record = await getCedulaRecord(pool, clave);
+    if (!record || Number(record.aprobado) !== 1 || !record.cadena_aprobacion) return res.status(404).json({ success: false, message: "La Cédula RET no está disponible" });
+    if (record.cedula_ret) return sendStoredObject(res, record.cedula_ret, `Cedula-RET-${clave}.pdf`, true);
+    const approvedAt = new Date(Number(String(record.cadena_aprobacion).split(".")[0]));
+    const pdf = await generateCedulaRet({ ...record, fecha_aprobacion: approvedAt });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="Cedula-RET-${clave}.pdf"`);
+    res.send(pdf);
+  } catch (error) { next(error); }
+});
+
+const ADMIN_DOCUMENT_FIELDS = Object.freeze({
+  rfc: "Constancia de Situación Fiscal / RFC",
+  curp: "CURP",
+  ife: "Identificación Oficial con Fotografía / INE",
+  licencia_suelo: "Licencia de Uso de Suelo",
+  escritura_publica: "Escritura Pública / Contrato de Arrendamiento",
+  acta_constitutiva: "Acta Constitutiva y carta poder",
+  rfc_legal: "RFC del representante legal",
+  domicilio: "Comprobante de Domicilio",
+  protocolo_higiene: "Protocolo de Higiene",
+  imagen_promocional: "Imagen Promocional",
+  logo: "Logotipo",
+  imagen1: "Fotografía exterior",
+  imagen2: "Fotografía interior",
+  imagen3: "Imagen de las instalaciones",
+});
+
+app.get("/api/admin/tramites/:clave/expediente", requireAdmin, async (req, res, next) => {
+  try {
+    const clave = String(req.params.clave || "").trim().toUpperCase();
+    const [[general]] = await pool.execute(
+      `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre
+       FROM ret_datos_generales d
+       LEFT JOIN ret_giro g ON g.id_giro = d.giro
+       LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+       WHERE d.clave = ? LIMIT 1`,
+      [clave],
+    );
+    if (!general) return res.status(404).json({ success: false, message: "No se encontró el expediente" });
+    const giroTable = GIRO_TABLES[Number(general.giro)];
+    const [technicalResult, giroResult, filesResult] = await Promise.all([
+      pool.execute("SELECT * FROM ret_frm_tecnicos WHERE clave = ? LIMIT 1", [clave]),
+      giroTable ? pool.query("SELECT * FROM ?? WHERE clave = ? LIMIT 1", [giroTable, clave]) : Promise.resolve([[]]),
+      pool.execute(`SELECT ${Object.keys(ADMIN_DOCUMENT_FIELDS).map((field) => `\`${field}\``).join(", ")} FROM ret_archivo_legal WHERE clave = ? LIMIT 1`, [clave]),
+    ]);
+    const technical = technicalResult[0][0] || {};
+    const giroData = giroResult[0][0] || {};
+    const files = filesResult[0][0] || {};
+    const documents = Object.entries(ADMIN_DOCUMENT_FIELDS).map(([field, label]) => ({ field, label, available: Boolean(files?.[field]) }));
+    res.status(200).json({ success: true, data: {
+      general,
+      technical: technical || {},
+      giro: giroData,
+      giroTable: giroTable || null,
+      documents,
+    } });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/tramites/:clave/documentos/:field", requireAdmin, async (req, res, next) => {
+  const field = String(req.params.field || "");
+  if (!ADMIN_DOCUMENT_FIELDS[field]) return res.status(404).json({ success: false, message: "Documento no válido" });
+  try {
+    const [[row]] = await pool.query("SELECT ?? AS file_path FROM ret_archivo_legal WHERE clave = ? LIMIT 1", [field, req.params.clave]);
+    if (!row?.file_path) return res.status(404).json({ success: false, message: "Archivo no encontrado" });
+    await sendStoredObject(res, row.file_path, `${field}-${req.params.clave}${path.extname(row.file_path) || ""}`);
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/tramites/:clave/observaciones", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  const observations = String(req.body.observaciones || "").trim();
+  if (observations.length < 10 || observations.length > 2000) return res.status(400).json({ success: false, message: "Escribe observaciones claras de entre 10 y 2000 caracteres" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const record = await getCedulaRecord(connection, clave, true);
+    if (!record) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el registro" });
+    }
+    if (Number(record.concluido) !== 1 || Number(record.aprobado) === 1) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "Solo se pueden observar trámites concluidos pendientes de aprobación" });
+    }
+    await connection.execute(
+      `UPDATE ret_datos_generales SET concluido = 0, aprobado = 0, renovar = 0,
+       observaciones = ?, notifica_observacion = 1 WHERE clave = ?`,
+      [observations, clave],
+    );
+    await connection.commit();
+    let emailSent = false;
+    if (record.correo) {
+      try {
+        await sendReviewObservations({ to: record.correo, clave, nombreComercial: record.nombre_comercial, observations });
+        emailSent = true;
+      } catch (mailError) {
+        console.error("No fue posible enviar las observaciones RET:", mailError.code || mailError.message);
+      }
+    }
+    res.status(200).json({ success: true, message: emailSent ? "Observaciones enviadas; el trámite regresó a Pendientes" : "El trámite regresó a Pendientes, pero no fue posible enviar el correo", data: { emailSent } });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.get("/api/cedulas/verificar/:cadena", publicMapLimiter, async (req, res, next) => {
+  try {
+    const cadena = String(req.params.cadena || "").trim();
+    if (!/^\d{13}\.[a-f0-9]{64}$/i.test(cadena)) return res.status(400).json({ success: false, message: "Sello digital no válido" });
+    const [[record]] = await pool.execute(
+      `SELECT d.clave, d.nombre_comercial, g.giro, m.municipio
+       FROM ret_datos_generales d
+       LEFT JOIN ret_giro g ON g.id_giro = d.giro
+       LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+       WHERE d.cadena_aprobacion = ? AND d.aprobado = 1 LIMIT 1`,
+      [cadena],
+    );
+    if (!record) return res.status(404).json({ success: false, message: "La Cédula RET no fue encontrada o ya no es válida" });
+    res.status(200).json({ success: true, message: "Cédula RET válida", data: { ...record, fecha_aprobacion: new Date(Number(cadena.split(".")[0])).toISOString() } });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
   try {
     const [[metricsRows], [byGiro], [byMunicipio], [activityRows]] = await Promise.all([
@@ -320,7 +544,7 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
         SUM(visible = 1) AS activos,
         SUM(DATE(fecha_registro) = CURRENT_DATE()) AS hoy,
         SUM(COALESCE(concluido, 0) = 0) AS pendientes,
-        SUM(concluido = 1) AS concluidos,
+        SUM(concluido = 1 AND COALESCE(aprobado, 0) = 0 AND COALESCE(renovar, 0) = 0) AS concluidos,
         SUM(aprobado = 1) AS aprobados,
         SUM(renovar = 1) AS renovaciones,
         0 AS vencidos
@@ -722,9 +946,7 @@ app.get("/api/form/datos-legales/archivo/:field", requireAuth, async (req, res, 
   try {
     const [[row]] = await pool.query("SELECT ?? AS file_path FROM ret_archivo_legal WHERE clave = ? LIMIT 1", [column, req.auth.clave]);
     if (!row?.file_path) return res.status(404).json({ success: false, message: "Archivo no encontrado" });
-    const absolutePath = path.resolve(uploadsRoot, row.file_path);
-    if (!absolutePath.startsWith(`${uploadsRoot}${path.sep}`)) return res.status(400).json({ success: false, message: "Ruta de archivo no válida" });
-    res.sendFile(absolutePath);
+    await sendStoredObject(res, row.file_path, `${column}-${req.auth.clave}${path.extname(row.file_path) || ""}`, true);
   } catch (error) {
     next(error);
   }
@@ -732,6 +954,7 @@ app.get("/api/form/datos-legales/archivo/:field", requireAuth, async (req, res, 
 
 app.post("/api/form/datos-legales", requireAuth, legalUpload.fields(Object.keys(LEGAL_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
   const uploadedFiles = Object.values(req.files || {}).flat();
+  const uploadedS3Keys = [];
   const cleanTemporaryFiles = async () => Promise.all(uploadedFiles.map((file) => fsp.unlink(file.path).catch(() => {})));
   try {
     const signatures = { "application/pdf": Buffer.from("%PDF"), "image/png": Buffer.from([0x89, 0x50, 0x4e, 0x47]), "image/jpeg": Buffer.from([0xff, 0xd8, 0xff]) };
@@ -769,27 +992,29 @@ app.post("/api/form/datos-legales", requireAuth, legalUpload.fields(Object.keys(
       return res.status(400).json({ success: false, message: "Adjunta todos los documentos obligatorios" });
     }
 
-    const legalDirectory = path.join(uploadsRoot, "legal", req.auth.clave);
-    await fsp.mkdir(legalDirectory, { recursive: true });
     const extensions = { "application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg" };
     const updates = [];
     const values = [];
     for (const [field, files] of Object.entries(req.files || {})) {
       const file = files[0];
       const filename = `${field}-${crypto.randomUUID()}${extensions[file.mimetype]}`;
-      const destination = path.join(legalDirectory, filename);
-      await fsp.rename(file.path, destination);
+      const key = `${S3_PREFIX}/${req.auth.clave}/documentos/${filename}`;
+      await putS3Object({ key, body: await fsp.readFile(file.path), contentType: file.mimetype, filename });
+      uploadedS3Keys.push(key);
+      await fsp.unlink(file.path).catch(() => {});
       updates.push("?? = ?");
-      values.push(LEGAL_FIELDS[field], path.relative(uploadsRoot, destination).replaceAll(path.sep, "/"));
+      values.push(LEGAL_FIELDS[field], key);
     }
     if (updates.length) {
       await pool.query(`UPDATE ret_archivo_legal SET porcentaje_registro = 40, ${updates.join(", ")} WHERE clave = ?`, [...values, req.auth.clave]);
     } else {
       await pool.execute("UPDATE ret_archivo_legal SET porcentaje_registro = 40 WHERE clave = ?", [req.auth.clave]);
     }
+    await Promise.all(Object.keys(req.files || {}).map((field) => deleteS3Object(current[field]).catch(() => {})));
     res.status(200).json({ success: true, message: "Documentos legales guardados correctamente" });
   } catch (error) {
     await cleanTemporaryFiles();
+    await Promise.all(uploadedS3Keys.map((key) => deleteS3Object(key).catch(() => {})));
     next(error);
   }
 });
@@ -814,9 +1039,7 @@ app.get("/api/form/datos-graficos/archivo/:field", requireAuth, async (req, res,
   try {
     const [[row]] = await pool.query("SELECT ?? AS file_path FROM ret_archivo_legal WHERE clave = ? LIMIT 1", [column, req.auth.clave]);
     if (!row?.file_path) return res.status(404).json({ success: false, message: "Imagen no encontrada" });
-    const absolutePath = path.resolve(uploadsRoot, row.file_path);
-    if (!absolutePath.startsWith(`${uploadsRoot}${path.sep}`)) return res.status(400).json({ success: false, message: "Ruta de imagen no válida" });
-    res.sendFile(absolutePath);
+    await sendStoredObject(res, row.file_path, `${column}-${req.auth.clave}${path.extname(row.file_path) || ".jpg"}`, true);
   } catch (error) {
     next(error);
   }
@@ -824,6 +1047,7 @@ app.get("/api/form/datos-graficos/archivo/:field", requireAuth, async (req, res,
 
 app.post("/api/form/datos-graficos", requireAuth, graphicUpload.fields(Object.keys(GRAPHIC_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
   const uploadedFiles = Object.values(req.files || {}).flat();
+  const uploadedS3Keys = [];
   const cleanTemporaryFiles = async () => Promise.all(uploadedFiles.map((file) => fsp.unlink(file.path).catch(() => {})));
   try {
     const acceptsPromotion = req.body.promocion_gtomx === "1" || req.body.promocion_gtomx === "true";
@@ -856,27 +1080,29 @@ app.post("/api/form/datos-graficos", requireAuth, graphicUpload.fields(Object.ke
       await cleanTemporaryFiles();
       return res.status(400).json({ success: false, message: "Adjunta todas las imágenes obligatorias" });
     }
-    const graphicDirectory = path.join(uploadsRoot, "graphic", req.auth.clave);
-    await fsp.mkdir(graphicDirectory, { recursive: true });
     const updates = [];
     const values = [];
     for (const [field, files] of Object.entries(req.files || {})) {
       const file = files[0];
       const extension = file.mimetype === "image/png" ? ".png" : ".jpg";
       const filename = `${field}-${crypto.randomUUID()}${extension}`;
-      const destination = path.join(graphicDirectory, filename);
-      await fsp.rename(file.path, destination);
+      const key = `${S3_PREFIX}/${req.auth.clave}/imagenes/${filename}`;
+      await putS3Object({ key, body: await fsp.readFile(file.path), contentType: file.mimetype, filename });
+      uploadedS3Keys.push(key);
+      await fsp.unlink(file.path).catch(() => {});
       updates.push("?? = ?");
-      values.push(GRAPHIC_FIELDS[field], path.relative(uploadsRoot, destination).replaceAll(path.sep, "/"));
+      values.push(GRAPHIC_FIELDS[field], key);
     }
     if (updates.length) {
       await pool.query(`UPDATE ret_archivo_legal SET porcentaje_registro=60, promocion_gtomx=1, ${updates.join(", ")} WHERE clave=?`, [...values, req.auth.clave]);
     } else {
       await pool.execute("UPDATE ret_archivo_legal SET porcentaje_registro=60, promocion_gtomx=1 WHERE clave=?", [req.auth.clave]);
     }
+    await Promise.all(Object.keys(req.files || {}).map((field) => deleteS3Object(current[field]).catch(() => {})));
     res.status(200).json({ success: true, message: "Documentación gráfica guardada correctamente" });
   } catch (error) {
     await cleanTemporaryFiles();
+    await Promise.all(uploadedS3Keys.map((key) => deleteS3Object(key).catch(() => {})));
     next(error);
   }
 });
@@ -945,7 +1171,10 @@ app.put("/api/form/hospedaje", requireAuth, async (req, res, next) => {
       await connection.rollback();
       return res.status(404).json({ success: false, message: "No se encontró el formulario de hospedaje" });
     }
-    await connection.execute("UPDATE ret_datos_generales SET porcentaje_registro=80 WHERE clave=?", [req.auth.clave]);
+    await connection.execute(
+      "UPDATE ret_datos_generales SET porcentaje_registro = 80, concluido = 1, renovar = 0 WHERE clave = ?",
+      [req.auth.clave],
+    );
     await connection.commit();
     res.status(200).json({ success: true, message: "Formulario de hospedaje guardado correctamente" });
   } catch (error) {

@@ -92,4 +92,52 @@ const sendPasswordRecovery = async ({ to, clave, temporaryPassword, nombreComerc
   });
 };
 
-module.exports = { sendRegistrationCredentials, sendPasswordRecovery };
+const sendApprovalCertificate = async ({ to, clave, nombreComercial, pdf }) => {
+  const safeName = escapeHtml(nombreComercial || "establecimiento");
+  const safeClave = escapeHtml(clave);
+  return getTransporter().sendMail({
+    from: process.env.MAIL_FROM || process.env.MAIL_USER,
+    to,
+    subject: "Trámite RET / APROBADO",
+    text: `Hola ${nombreComercial || "establecimiento"},\n\nTu trámite ${clave} fue aprobado. Adjuntamos tu Cédula RET en formato PDF.\n\nConserva este documento para futuras consultas.`,
+    html: `
+      <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
+        <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
+          <div style="padding:24px 30px;background:linear-gradient(110deg,#00abc8,#0878b9);color:#fff">
+            <strong style="font-size:22px">Trámite RET aprobado</strong>
+            <div style="margin-top:5px;font-size:13px">Registro Estatal de Turismo de Guanajuato</div>
+          </div>
+          <div style="padding:30px">
+            <p style="margin-top:0">Hola <strong>${safeName}</strong>:</p>
+            <p>Tu registro <strong>${safeClave}</strong> fue revisado y aprobado.</p>
+            <p>Encontrarás adjunta tu <strong>Cédula RET</strong>, que contiene el código QR y el sello digital de verificación.</p>
+            <p style="margin-bottom:0;font-size:13px;color:#617887">Conserva este documento para futuras consultas.</p>
+          </div>
+        </div>
+      </div>`,
+    attachments: [{ filename: `Cedula-RET-${clave}.pdf`, content: pdf, contentType: "application/pdf" }],
+  });
+};
+
+const sendReviewObservations = async ({ to, clave, nombreComercial, observations }) => {
+  const safeName = escapeHtml(nombreComercial || "establecimiento");
+  const safeClave = escapeHtml(clave);
+  const safeObservations = escapeHtml(observations).replace(/\n/g, "<br>");
+  return getTransporter().sendMail({
+    from: process.env.MAIL_FROM || process.env.MAIL_USER,
+    to,
+    subject: "Trámite RET / OBSERVACIONES",
+    text: `Hola ${nombreComercial || "establecimiento"},\n\nEl trámite ${clave} requiere correcciones:\n\n${observations}\n\nIngresa al sistema RET para actualizar la información o documentación indicada.`,
+    html: `
+      <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
+        <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
+          <div style="padding:24px 30px;background:#0b4a86;color:#fff"><strong style="font-size:22px">Observaciones al trámite RET</strong></div>
+          <div style="padding:30px"><p>Hola <strong>${safeName}</strong>:</p><p>El trámite <strong>${safeClave}</strong> requiere correcciones antes de ser aprobado.</p>
+            <div style="margin:22px 0;padding:18px;border-left:4px solid #ff7a00;background:#fff6e9">${safeObservations}</div>
+            <p style="margin-bottom:0">Ingresa al sistema RET para actualizar la información o documentación indicada.</p></div>
+        </div>
+      </div>`,
+  });
+};
+
+module.exports = { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations };

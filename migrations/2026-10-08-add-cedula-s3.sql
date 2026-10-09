@@ -1,0 +1,16 @@
+ALTER TABLE ret_archivo_legal
+  ADD COLUMN IF NOT EXISTS cedula_ret VARCHAR(255) NULL AFTER imagen_promocional,
+  MODIFY rfc VARCHAR(255) NULL,
+  MODIFY rfc_legal VARCHAR(255) NULL,
+  MODIFY curp VARCHAR(255) NULL,
+  MODIFY ife VARCHAR(255) NULL,
+  MODIFY licencia_suelo VARCHAR(255) NULL,
+  MODIFY acta_constitutiva VARCHAR(255) NULL,
+  MODIFY escritura_publica VARCHAR(255) NULL,
+  MODIFY domicilio VARCHAR(255) NULL,
+  MODIFY protocolo_higiene VARCHAR(255) NULL,
+  MODIFY logo VARCHAR(255) NULL,
+  MODIFY imagen1 VARCHAR(255) NULL,
+  MODIFY imagen2 VARCHAR(255) NULL,
+  MODIFY imagen3 VARCHAR(255) NULL,
+  MODIFY imagen_promocional VARCHAR(255) NULL;
