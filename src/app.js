@@ -16,6 +16,7 @@ const { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertifica
 const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
+const { assessLogin } = require("./recaptcha");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -232,11 +233,34 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   }
   const clave = String(req.body.clave || "").trim().toUpperCase();
   const password = String(req.body.password || "");
+  const recaptchaToken = String(req.body.recaptcha_token || "").trim();
+  const failedAttempts = Number(req.rateLimit?.used || 0);
+  const captchaRequired = failedAttempts > 3;
+  const authenticationFailure = () => res.status(401).json({
+    success: false,
+    message: "Clave RET o contraseña incorrecta",
+    captcha_required: failedAttempts >= 3,
+  });
+  if (captchaRequired && !recaptchaToken) {
+    return res.status(428).json({ success: false, message: "Se requiere la validación reCAPTCHA para continuar", captcha_required: true });
+  }
   if (!/^RET\d{6,14}$/.test(clave) || !password || password.length > 128) {
-    return res.status(401).json({ success: false, message: "Clave RET o contraseña incorrecta" });
+    return authenticationFailure();
   }
 
   try {
+    if (captchaRequired) {
+      let assessment;
+      try {
+        assessment = await assessLogin({ token: recaptchaToken, ipAddress: req.ip, userAgent: req.get("user-agent") });
+      } catch (error) {
+        console.error("No fue posible consultar reCAPTCHA Enterprise:", error.code || error.message);
+        return res.status(503).json({ success: false, message: "La validación de seguridad no está disponible. Intenta nuevamente más tarde", captcha_required: true });
+      }
+      if (!assessment.valid) {
+        return res.status(403).json({ success: false, message: "No fue posible validar que seas una persona. Intenta nuevamente", captcha_required: true });
+      }
+    }
     const [[user]] = await pool.execute(
       `SELECT u.id_usr, u.id, u.pass, u.email, u.id_perfil, u.activo,
               d.nombre_comercial, d.giro, d.porcentaje_registro
@@ -246,7 +270,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
       [clave],
     );
     if (!user || Number(user.activo) !== 1) {
-      return res.status(401).json({ success: false, message: "Clave RET o contraseña incorrecta" });
+      return authenticationFailure();
     }
 
     let passwordMatches = false;
@@ -257,7 +281,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
       passwordMatches = crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(user.pass.toLowerCase()));
     }
     if (!passwordMatches) {
-      return res.status(401).json({ success: false, message: "Clave RET o contraseña incorrecta" });
+      return authenticationFailure();
     }
 
     if (!usesBcrypt) {
