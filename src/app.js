@@ -34,6 +34,14 @@ const uploadsRoot = path.resolve(__dirname, "../uploads");
 const temporaryUploads = path.join(uploadsRoot, "tmp");
 fs.mkdirSync(temporaryUploads, { recursive: true });
 const safeDownloadName = (value) => String(value || "archivo").replace(/[^A-Za-z0-9._-]/g, "-");
+const legacyDocumentUrl = (storedPath) => {
+  const cleanPath = String(storedPath || "").trim().replace(/^\.\//, "").replaceAll("\\", "/");
+  if (!cleanPath || cleanPath.startsWith("/") || cleanPath.includes("..") || /[\0\r\n]/.test(cleanPath) || /^[a-z]+:/i.test(cleanPath)) {
+    throw Object.assign(new Error("Ruta de archivo antiguo no válida"), { status: 400 });
+  }
+  const baseUrl = String(process.env.LEGACY_DOCUMENTS_BASE_URL || "/documentos").replace(/\/$/, "");
+  return `${baseUrl}/${cleanPath.split("/").map(encodeURIComponent).join("/")}`;
+};
 const sendStoredObject = async (res, storedPath, filename, inline = false) => {
   if (isS3Key(storedPath)) {
     const object = await getS3Object(storedPath);
@@ -45,7 +53,8 @@ const sendStoredObject = async (res, storedPath, filename, inline = false) => {
   }
   const absolutePath = path.resolve(uploadsRoot, storedPath);
   if (!absolutePath.startsWith(`${uploadsRoot}${path.sep}`)) throw Object.assign(new Error("Ruta de archivo no válida"), { status: 400 });
-  return inline ? res.sendFile(absolutePath) : res.download(absolutePath, safeDownloadName(filename));
+  if (fs.existsSync(absolutePath)) return inline ? res.sendFile(absolutePath) : res.download(absolutePath, safeDownloadName(filename));
+  return res.redirect(302, legacyDocumentUrl(storedPath));
 };
 const legalUpload = multer({
   dest: temporaryUploads,
