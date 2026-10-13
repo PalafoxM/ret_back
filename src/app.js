@@ -2480,13 +2480,15 @@ app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, r
       return res.status(400).json({ success: false, message: "El municipio seleccionado no existe" });
     }
 
-    const [[existingRfc]] = await connection.execute(
-      "SELECT id_pts FROM ret_datos_generales WHERE info_rfc = ? LIMIT 1",
-      [rfc],
-    );
-    if (existingRfc) {
-      await connection.rollback();
-      return res.status(409).json({ success: false, message: "El RFC ya se encuentra registrado" });
+    if (!req.auth) {
+      const [[existingRfc]] = await connection.execute(
+        "SELECT id_pts FROM ret_datos_generales WHERE info_rfc = ? LIMIT 1",
+        [rfc],
+      );
+      if (existingRfc) {
+        await connection.rollback();
+        return res.status(409).json({ success: false, message: "El RFC ya se encuentra registrado" });
+      }
     }
 
     const { date, dateTime } = getMexicoDateParts();
