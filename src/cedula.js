@@ -70,11 +70,11 @@ const generateCedulaRet = async (record) => {
   const qrImage = await document.embedPng(qrData);
 
   drawCenteredValue(page, bold, record.clave, 520, 447, 270, 22);
-  drawValue(page, bold, record.nombre_comercial, 240, 359, 545, 16);
-  drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 240, 339, 545, 9);
-  drawValue(page, bold, record.domicilio, 240, 286, 500, 11);
-  drawValue(page, regular, record.municipio, 240, 267, 500, 10);
-  drawValue(page, bold, record.giro, 285, 220, 455, 13);
+  drawValue(page, bold, record.nombre_comercial, 255, 359, 545, 16);
+  drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 255, 339, 545, 9);
+  drawValue(page, bold, record.domicilio, 255, 286, 500, 11);
+  drawValue(page, regular, record.municipio, 255, 267, 500, 10);
+  drawValue(page, bold, record.giro, 255, 220, 455, 13);
   drawValue(page, bold, formatRegistrationDate(record.fecha_inscripcion), 48, 108, 180, 11);
   drawValue(page, bold, formatDate(expirationDate(record.fecha_vigencia_base)), 255, 108, 150, 11);
   page.drawImage(qrImage, { x: 660, y: 71, width: 102, height: 102 });
