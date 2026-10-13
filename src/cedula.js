@@ -23,6 +23,13 @@ const formatDate = (value) => {
   return new Intl.DateTimeFormat("es-MX", { day: "2-digit", month: "long", year: "numeric" }).format(date);
 };
 
+const expirationDate = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setFullYear(date.getFullYear() + 3);
+  return date;
+};
+
 const fitText = (font, text, maxWidth, initialSize = 11, minimumSize = 7) => {
   let size = initialSize;
   while (size > minimumSize && font.widthOfTextAtSize(text, size) > maxWidth) size -= 0.5;
@@ -46,18 +53,18 @@ const generateCedulaRet = async (record) => {
   const qrData = await QRCode.toDataURL(verificationUrl, { errorCorrectionLevel: "M", margin: 1, width: 320 });
   const qrImage = await document.embedPng(qrData);
 
-  drawValue(page, bold, record.nombre_comercial, 58, 616, 479, 18);
-  drawValue(page, bold, record.clave, 58, 543, 479, 13);
-  drawValue(page, regular, record.giro, 58, 485, 479, 12);
-  drawValue(page, regular, record.domicilio, 58, 427, 479, 10.5);
-  drawValue(page, regular, record.municipio, 58, 359, 230, 11);
-  drawValue(page, regular, record.rfc, 330, 359, 207, 11);
-  drawValue(page, regular, formatDate(record.fecha_registro), 58, 301, 230, 10.5);
-  drawValue(page, regular, formatDate(approvalDate), 330, 301, 207, 10.5);
-  page.drawImage(qrImage, { x: 58, y: 101, width: 112, height: 112 });
-  page.drawText(record.cadena_aprobacion, { x: 212, y: 132, size: 6.3, font: regular, color: gray, maxWidth: 320, lineHeight: 8 });
-  page.drawText("Validar en:", { x: 212, y: 112, size: 6.5, font: bold, color: navy });
-  page.drawText(verificationUrl, { x: 252, y: 112, size: fitText(regular, verificationUrl, 280, 6.5, 5), font: regular, color: gray });
+  drawValue(page, bold, record.clave, 545, 429, 250, 25);
+  drawValue(page, bold, record.nombre_comercial, 240, 359, 545, 16);
+  drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 240, 339, 545, 9);
+  drawValue(page, bold, record.domicilio, 240, 286, 500, 11);
+  drawValue(page, regular, record.municipio, 240, 267, 500, 10);
+  drawValue(page, bold, record.giro, 240, 220, 500, 14);
+  drawValue(page, bold, formatDate(approvalDate), 48, 108, 180, 11);
+  drawValue(page, bold, formatDate(expirationDate(approvalDate)), 255, 108, 150, 11);
+  page.drawImage(qrImage, { x: 660, y: 71, width: 102, height: 102 });
+  const seal = String(record.cadena_aprobacion || "");
+  page.drawText(seal.slice(0, 48), { x: 430, y: 69, size: 5.1, font: regular, color: gray });
+  page.drawText(seal.slice(48), { x: 430, y: 61.5, size: 5.1, font: regular, color: gray });
 
   document.setTitle(`Cédula RET ${record.clave}`);
   document.setSubject("Constancia de aprobación del Registro Estatal de Turismo");
