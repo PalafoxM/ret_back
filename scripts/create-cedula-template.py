@@ -67,7 +67,7 @@ def create_template():
     pdf.drawString(48, content_top - 43, "Emitida a favor de:")
     pdf.setFont("Helvetica", 15)
     pdf.drawString(48, content_top - 178, "Como Persona Prestadora de")
-    pdf.drawString(48, content_top - 198, "Servicios Turísticos:")
+    pdf.drawString(48, content_top - 188, "Servicios Turísticos:")
     pdf.setFont("Helvetica-Bold", 7.5)
     pdf.setFillColor(gray)
     pdf.drawString(240, content_top - 95, "DOMICILIO DEL ESTABLECIMIENTO")

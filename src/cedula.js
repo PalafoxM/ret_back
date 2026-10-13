@@ -16,15 +16,27 @@ const createApprovalSeal = ({ clave, approvedAt }) => {
   return `${new Date(approvedAt).getTime()}.${signature}`;
 };
 
+const parseDatabaseDate = (value) => {
+  if (value instanceof Date) return new Date(value.getTime());
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return new Date(value);
+};
+
 const formatDate = (value) => {
   if (!value) return "-";
-  const date = new Date(value);
+  const date = parseDatabaseDate(value);
   if (Number.isNaN(date.getTime())) return "-";
-  return new Intl.DateTimeFormat("es-MX", { day: "2-digit", month: "long", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("es-MX", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+};
+
+const formatRegistrationDate = (value) => {
+  const match = String(value || "").match(/^(\d{2}\/\d{2}\/\d{4})/);
+  return match ? match[1] : formatDate(value);
 };
 
 const expirationDate = (value) => {
-  const date = new Date(value);
+  const date = parseDatabaseDate(value);
   if (Number.isNaN(date.getTime())) return null;
   date.setFullYear(date.getFullYear() + 3);
   return date;
@@ -41,26 +53,32 @@ const drawValue = (page, font, value, x, y, width, size = 11) => {
   page.drawText(text, { x, y, size: fitText(font, text, width, size), font, color: navy, maxWidth: width });
 };
 
+const drawCenteredValue = (page, font, value, x, y, width, size = 11) => {
+  const text = String(value || "-").replace(/\s+/g, " ").trim();
+  const fittedSize = fitText(font, text, width, size);
+  const textWidth = font.widthOfTextAtSize(text, fittedSize);
+  page.drawText(text, { x: x + Math.max(0, (width - textWidth) / 2), y, size: fittedSize, font, color: navy });
+};
+
 const generateCedulaRet = async (record) => {
   const template = await fs.readFile(templatePath);
   const document = await PDFDocument.load(template);
   const page = document.getPage(0);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
   const regular = await document.embedFont(StandardFonts.Helvetica);
-  const approvalDate = record.fecha_aprobacion || new Date();
   const verificationBase = String(process.env.PUBLIC_API_URL || "http://localhost:3000").replace(/\/$/, "");
   const verificationUrl = `${verificationBase}/api/cedulas/verificar/${encodeURIComponent(record.cadena_aprobacion)}`;
   const qrData = await QRCode.toDataURL(verificationUrl, { errorCorrectionLevel: "M", margin: 1, width: 320 });
   const qrImage = await document.embedPng(qrData);
 
-  drawValue(page, bold, record.clave, 545, 429, 250, 25);
+  drawCenteredValue(page, bold, record.clave, 520, 447, 270, 22);
   drawValue(page, bold, record.nombre_comercial, 240, 359, 545, 16);
   drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 240, 339, 545, 9);
   drawValue(page, bold, record.domicilio, 240, 286, 500, 11);
   drawValue(page, regular, record.municipio, 240, 267, 500, 10);
   drawValue(page, bold, record.giro, 240, 220, 500, 14);
-  drawValue(page, bold, formatDate(approvalDate), 48, 108, 180, 11);
-  drawValue(page, bold, formatDate(expirationDate(approvalDate)), 255, 108, 150, 11);
+  drawValue(page, bold, formatRegistrationDate(record.fecha_inscripcion), 48, 108, 180, 11);
+  drawValue(page, bold, formatDate(expirationDate(record.fecha_vigencia_base)), 255, 108, 150, 11);
   page.drawImage(qrImage, { x: 660, y: 71, width: 102, height: 102 });
   const seal = String(record.cadena_aprobacion || "");
   page.drawText(seal.slice(0, 48), { x: 430, y: 69, size: 5.1, font: regular, color: gray });

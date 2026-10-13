@@ -381,9 +381,18 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
     [clave],
   );
   if (!rows[0]) return null;
+  const [viewRows] = await executor.execute(
+    `SELECT dg_fecha_registro_alt, dg_fecha_registro
+     FROM vw_usr_datos
+     WHERE clave = ?
+     LIMIT 1`,
+    [clave],
+  );
   const row = rows[0];
   return {
     ...row,
+    fecha_inscripcion: viewRows[0]?.dg_fecha_registro_alt || "",
+    fecha_vigencia_base: viewRows[0]?.dg_fecha_registro || null,
     correo: row.correo || row.cuenta_email || "",
     rfc: row.info_rfc || row.rfc_empresa || "",
     domicilio: [row.calle, row.numero, row.interior ? `Int. ${row.interior}` : "", row.colonia, row.cp ? `C.P. ${row.cp}` : ""].filter(Boolean).join(", "),
@@ -448,7 +457,6 @@ app.get("/api/admin/tramites/:clave/cedula", requireAdmin, async (req, res, next
     const clave = String(req.params.clave || "").trim().toUpperCase();
     const record = await getCedulaRecord(pool, clave);
     if (!record || Number(record.aprobado) !== 1 || !record.cadena_aprobacion) return res.status(404).json({ success: false, message: "La Cédula RET no está disponible" });
-    if (record.cedula_ret) return sendStoredObject(res, record.cedula_ret, `Cedula-RET-${clave}.pdf`, true);
     const approvedAt = new Date(Number(String(record.cadena_aprobacion).split(".")[0]));
     const pdf = await generateCedulaRet({ ...record, fecha_aprobacion: approvedAt });
     res.setHeader("Content-Type", "application/pdf");
