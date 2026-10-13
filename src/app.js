@@ -369,6 +369,8 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
     `SELECT d.clave, d.nombre_comercial, d.info_rfc, d.rfc_empresa, d.correo,
       d.calle, d.numero, d.interior, d.colonia, d.cp, d.fecha_registro,
       d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
+      (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
+       AND COALESCE(d.renovar, 0) = 0) AS es_vencido,
       g.giro, m.municipio, u.email AS cuenta_email
      FROM ret_datos_generales d
      LEFT JOIN ret_giro g ON g.id_giro = d.giro
@@ -476,7 +478,14 @@ app.get("/api/admin/tramites/:clave/expediente", requireAdmin, async (req, res, 
   try {
     const clave = String(req.params.clave || "").trim().toUpperCase();
     const [[general]] = await pool.execute(
-      `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre
+      `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre,
+        CASE WHEN d.fecha_registro IS NOT NULL
+          AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
+          AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
+          WHEN d.aprobado = 1 THEN 'Aprobado'
+          WHEN d.renovar = 1 THEN 'Renovación'
+          WHEN d.concluido = 1 THEN 'Concluido'
+          ELSE 'Pendiente' END AS estatus
        FROM ret_datos_generales d
        LEFT JOIN ret_giro g ON g.id_giro = d.giro
        LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
@@ -527,9 +536,10 @@ app.post("/api/admin/tramites/:clave/observaciones", requireAdmin, async (req, r
       await connection.rollback();
       return res.status(404).json({ success: false, message: "No se encontró el registro" });
     }
-    if (Number(record.concluido) !== 1 || Number(record.aprobado) === 1) {
+    const expired = Number(record.es_vencido) === 1;
+    if (!expired && (Number(record.concluido) !== 1 || Number(record.aprobado) === 1)) {
       await connection.rollback();
-      return res.status(409).json({ success: false, message: "Solo se pueden observar trámites concluidos pendientes de aprobación" });
+      return res.status(409).json({ success: false, message: "Solo se pueden observar trámites concluidos pendientes de aprobación o vencidos" });
     }
     await connection.execute(
       `UPDATE ret_datos_generales SET concluido = 0, aprobado = 0, renovar = 0,
@@ -546,13 +556,32 @@ app.post("/api/admin/tramites/:clave/observaciones", requireAdmin, async (req, r
         console.error("No fue posible enviar las observaciones RET:", mailError.code || mailError.message);
       }
     }
-    res.status(200).json({ success: true, message: emailSent ? "Observaciones enviadas; el trámite regresó a Pendientes" : "El trámite regresó a Pendientes, pero no fue posible enviar el correo", data: { emailSent } });
+    const successMessage = expired ? "Observaciones enviadas al titular del trámite vencido" : "Observaciones enviadas; el trámite regresó a Pendientes";
+    const mailFailureMessage = expired ? "Las observaciones se registraron, pero no fue posible enviar el correo" : "El trámite regresó a Pendientes, pero no fue posible enviar el correo";
+    res.status(200).json({ success: true, message: emailSent ? successMessage : mailFailureMessage, data: { emailSent } });
   } catch (error) {
     if (connection) await connection.rollback().catch(() => {});
     next(error);
   } finally {
     if (connection) connection.release();
   }
+});
+
+app.post("/api/admin/tramites/:clave/vencido", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
+  try {
+    const [result] = await pool.execute(
+      `UPDATE ret_datos_generales
+       SET visible = 0, concluido = 0, aprobado = 0
+       WHERE clave = ? AND visible = 1 AND fecha_registro IS NOT NULL
+         AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095
+         AND COALESCE(renovar, 0) = 0`,
+      [clave],
+    );
+    if (!result.affectedRows) return res.status(409).json({ success: false, message: "El trámite no cumple las condiciones para enviarse a Vencidos" });
+    res.status(200).json({ success: true, message: "El trámite fue enviado a Vencidos correctamente" });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/cedulas/verificar/:cadena", publicMapLimiter, async (req, res, next) => {
@@ -577,12 +606,15 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
     const [[metricsRows], [byGiro], [byMunicipio], [activityRows]] = await Promise.all([
       pool.query(`SELECT
         SUM(visible = 1) AS activos,
-        SUM(DATE(fecha_registro) = CURRENT_DATE()) AS hoy,
-        SUM(COALESCE(concluido, 0) = 0) AS pendientes,
-        SUM(concluido = 1 AND COALESCE(aprobado, 0) = 0 AND COALESCE(renovar, 0) = 0) AS concluidos,
-        SUM(aprobado = 1) AS aprobados,
-        SUM(renovar = 1) AS renovaciones,
-        0 AS vencidos
+        SUM(visible = 1 AND DATE(fecha_registro) = CURRENT_DATE()) AS hoy,
+        SUM(visible = 1 AND COALESCE(concluido, 0) = 0
+          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0)) AS pendientes,
+        SUM(visible = 1 AND concluido = 1 AND COALESCE(aprobado, 0) = 0 AND COALESCE(renovar, 0) = 0
+          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095)) AS concluidos,
+        SUM(visible = 1 AND aprobado = 1
+          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0)) AS aprobados,
+        SUM(visible = 1 AND renovar = 1) AS renovaciones,
+        SUM(visible = 1 AND fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0) AS vencidos
         FROM ret_datos_generales`),
       pool.query(`SELECT COALESCE(g.giro, 'Sin especificar') AS label, COUNT(*) AS total
         FROM ret_datos_generales d LEFT JOIN ret_giro g ON g.id_giro = d.giro
@@ -614,10 +646,11 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const search = String(req.query.search || "").trim().slice(0, 100);
     const status = String(req.query.status || "").trim();
     const statusClauses = {
-      Pendiente: "COALESCE(d.concluido, 0) = 0",
-      Concluido: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0",
-      Aprobado: "d.aprobado = 1",
+      Pendiente: "COALESCE(d.concluido, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0)",
+      Concluido: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095)",
+      Aprobado: "d.aprobado = 1 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0)",
       "Renovación": "d.renovar = 1",
+      Vencido: "d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0",
     };
     const filters = ["d.visible = 1"];
     const params = [];
@@ -636,7 +669,10 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
       pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
       pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro,
         g.giro, m.municipio,
-        CASE WHEN d.aprobado = 1 THEN 'Aprobado'
+        CASE WHEN d.fecha_registro IS NOT NULL
+          AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
+          AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
+          WHEN d.aprobado = 1 THEN 'Aprobado'
           WHEN d.renovar = 1 THEN 'Renovación'
           WHEN d.concluido = 1 THEN 'Concluido' ELSE 'Pendiente' END AS estatus
         ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),

@@ -6,7 +6,7 @@ const STATE_REPORTS = Object.freeze({
   concluidos: { title: "Concluidos para validar", where: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0" },
   aprobados: { title: "Registros aprobados", where: "d.aprobado = 1" },
   renovaciones: { title: "Trámites en renovación", where: "d.renovar = 1" },
-  vencidos: { title: "Registros vencidos", where: "u.fecha_renovacion IS NOT NULL AND u.fecha_renovacion <> '' AND COALESCE(STR_TO_DATE(u.fecha_renovacion, '%Y-%m-%d'), STR_TO_DATE(u.fecha_renovacion, '%d/%m/%Y')) < CURRENT_DATE()" },
+  vencidos: { title: "Registros vencidos", where: "d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0" },
 });
 
 const APP_REPORTS = Object.freeze({
