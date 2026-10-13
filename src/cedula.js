@@ -66,9 +66,7 @@ const generateCedulaRet = async (record) => {
   const page = document.getPage(0);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
   const regular = await document.embedFont(StandardFonts.Helvetica);
-  const verificationBase = String(process.env.PUBLIC_API_URL || "http://localhost:3000").replace(/\/$/, "");
-  const verificationUrl = `${verificationBase}/api/cedulas/verificar/${encodeURIComponent(record.cadena_aprobacion)}`;
-  const qrData = await QRCode.toDataURL(verificationUrl, { errorCorrectionLevel: "M", margin: 1, width: 320 });
+  const qrData = await QRCode.toDataURL(String(record.clave || ""), { errorCorrectionLevel: "M", margin: 1, width: 320 });
   const qrImage = await document.embedPng(qrData);
 
   drawCenteredValue(page, bold, record.clave, 520, 447, 270, 22);
@@ -76,7 +74,7 @@ const generateCedulaRet = async (record) => {
   drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 240, 339, 545, 9);
   drawValue(page, bold, record.domicilio, 240, 286, 500, 11);
   drawValue(page, regular, record.municipio, 240, 267, 500, 10);
-  drawValue(page, bold, record.giro, 240, 220, 500, 14);
+  drawValue(page, bold, record.giro, 285, 220, 455, 13);
   drawValue(page, bold, formatRegistrationDate(record.fecha_inscripcion), 48, 108, 180, 11);
   drawValue(page, bold, formatDate(expirationDate(record.fecha_vigencia_base)), 255, 108, 150, 11);
   page.drawImage(qrImage, { x: 660, y: 71, width: 102, height: 102 });
