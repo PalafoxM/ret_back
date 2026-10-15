@@ -399,6 +399,20 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
   };
 };
 
+const publicVerificationUrl = (clave, seal) => {
+  const configuredBase = String(process.env.PUBLIC_WEB_URL || "").trim();
+  if (!configuredBase) {
+    if (process.env.NODE_ENV === "production") throw new Error("PUBLIC_WEB_URL es obligatoria para generar el QR de la Cédula RET");
+    return `http://localhost:5173/verificar/${encodeURIComponent(clave)}/${encodeURIComponent(seal)}`;
+  }
+  const base = new URL(configuredBase);
+  if (process.env.NODE_ENV === "production" && base.protocol !== "https:") throw new Error("PUBLIC_WEB_URL debe usar HTTPS en producción");
+  base.pathname = `${base.pathname.replace(/\/$/, "")}/verificar/${encodeURIComponent(clave)}/${encodeURIComponent(seal)}`;
+  base.search = "";
+  base.hash = "";
+  return base.toString();
+};
+
 app.post("/api/admin/tramites/:clave/aprobar", requireAdmin, async (req, res, next) => {
   const clave = String(req.params.clave || "").trim().toUpperCase();
   if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
@@ -422,7 +436,12 @@ app.post("/api/admin/tramites/:clave/aprobar", requireAdmin, async (req, res, ne
     }
     const approvedAt = new Date();
     const approvalSeal = createApprovalSeal({ clave, approvedAt: approvedAt.toISOString() });
-    const pdf = await generateCedulaRet({ ...record, cadena_aprobacion: approvalSeal, fecha_aprobacion: approvedAt });
+    const pdf = await generateCedulaRet({
+      ...record,
+      cadena_aprobacion: approvalSeal,
+      fecha_aprobacion: approvedAt,
+      verificationUrl: publicVerificationUrl(clave, approvalSeal),
+    });
     uploadedCedulaKey = `${S3_PREFIX}/${clave}/cedulas/Cedula-RET-${clave}.pdf`;
     await putS3Object({ key: uploadedCedulaKey, body: pdf, contentType: "application/pdf", filename: `Cedula-RET-${clave}.pdf` });
     await connection.execute(
@@ -458,7 +477,11 @@ app.get("/api/admin/tramites/:clave/cedula", requireAdmin, async (req, res, next
     const record = await getCedulaRecord(pool, clave);
     if (!record || Number(record.aprobado) !== 1 || !record.cadena_aprobacion) return res.status(404).json({ success: false, message: "La Cédula RET no está disponible" });
     const approvedAt = new Date(Number(String(record.cadena_aprobacion).split(".")[0]));
-    const pdf = await generateCedulaRet({ ...record, fecha_aprobacion: approvedAt });
+    const pdf = await generateCedulaRet({
+      ...record,
+      fecha_aprobacion: approvedAt,
+      verificationUrl: publicVerificationUrl(clave, record.cadena_aprobacion),
+    });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="Cedula-RET-${clave}.pdf"`);
     res.send(pdf);
@@ -589,6 +612,49 @@ app.post("/api/admin/tramites/:clave/vencido", requireAdmin, async (req, res, ne
     );
     if (!result.affectedRows) return res.status(409).json({ success: false, message: "El trámite no cumple las condiciones para enviarse a Vencidos" });
     res.status(200).json({ success: true, message: "El trámite fue enviado a Vencidos correctamente" });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/cedulas/verificar/:clave/:cadena", publicMapLimiter, async (req, res, next) => {
+  try {
+    const clave = String(req.params.clave || "").trim().toUpperCase();
+    const cadena = String(req.params.cadena || "").trim();
+    if (!/^RET[A-Z0-9-]{4,40}$/.test(clave) || !/^\d{13}\.[a-f0-9]{64}$/i.test(cadena)) {
+      return res.status(400).json({ success: false, message: "Los datos de verificación no son válidos" });
+    }
+    const [[record]] = await pool.execute(
+      `SELECT clave, nombre_comercial, calle, numero, interior, colonia, cp,
+        municipio_nombre AS municipio, g_giro AS giro,
+        SUBSTRING_INDEX(dg_fecha_registro_alt, ' ', 1) AS fecha_inscripcion,
+        DATE_FORMAT(DATE_ADD(dg_fecha_registro, INTERVAL 3 YEAR), '%d/%m/%Y') AS vigencia
+       FROM vw_usr_datos
+       WHERE clave = ? AND cadena_aprobacion = ? AND aprobado = 1 AND visible = 1
+       LIMIT 1`,
+      [clave, cadena],
+    );
+    res.set("Cache-Control", "no-store");
+    res.set("X-Robots-Tag", "noindex, nofollow");
+    if (!record) return res.status(404).json({ success: false, message: "La Cédula RET no fue encontrada o ya no es válida" });
+    const domicilio = [
+      record.calle,
+      record.numero,
+      record.interior ? `Int. ${record.interior}` : "",
+      record.colonia,
+      record.cp ? `C.P. ${record.cp}` : "",
+      record.municipio,
+    ].filter(Boolean).join(", ");
+    res.status(200).json({
+      success: true,
+      message: "Cédula RET válida",
+      data: {
+        clave: record.clave,
+        nombre_comercial: record.nombre_comercial || "",
+        domicilio,
+        giro: decodeLegacyHtmlEntities(record.giro || ""),
+        fecha_inscripcion: record.fecha_inscripcion || "",
+        vigencia: record.vigencia || "",
+      },
+    });
   } catch (error) { next(error); }
 });
 

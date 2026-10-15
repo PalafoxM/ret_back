@@ -63,13 +63,15 @@ const drawCenteredValue = (page, font, value, x, y, width, size = 11) => {
 };
 
 const generateCedulaRet = async (record) => {
+  const verificationUrl = String(record.verificationUrl || "").trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(verificationUrl)) throw new Error("La URL pública de verificación de la Cédula RET no está configurada");
   const backgroundBytes = await fs.readFile(backgroundPath);
   const document = await PDFDocument.create();
   const page = document.addPage([pageWidth, pageHeight]);
   const background = await document.embedPng(backgroundBytes);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
   const regular = await document.embedFont(StandardFonts.Helvetica);
-  const qrData = await QRCode.toDataURL(String(record.clave || ""), { errorCorrectionLevel: "M", margin: 1, width: 320 });
+  const qrData = await QRCode.toDataURL(verificationUrl, { errorCorrectionLevel: "M", margin: 1, width: 320 });
   const qrImage = await document.embedPng(qrData);
 
   page.drawImage(background, { x: 0, y: 0, width: pageWidth, height: pageHeight });
