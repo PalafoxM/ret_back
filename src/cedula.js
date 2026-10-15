@@ -4,9 +4,11 @@ const path = require("path");
 const QRCode = require("qrcode");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 
-const templatePath = path.resolve(__dirname, "../assets/cedula-ret-template.pdf");
+const backgroundPath = path.resolve(__dirname, "../assets/cedula_2024-2030.png");
 const navy = rgb(7 / 255, 55 / 255, 100 / 255);
 const gray = rgb(58 / 255, 78 / 255, 87 / 255);
+const pageWidth = 1064;
+const pageHeight = 822;
 
 const createApprovalSeal = ({ clave, approvedAt }) => {
   const secret = String(process.env.APPROVAL_SEAL_SECRET || process.env.JWT_SECRET || "");
@@ -61,26 +63,29 @@ const drawCenteredValue = (page, font, value, x, y, width, size = 11) => {
 };
 
 const generateCedulaRet = async (record) => {
-  const template = await fs.readFile(templatePath);
-  const document = await PDFDocument.load(template);
-  const page = document.getPage(0);
+  const backgroundBytes = await fs.readFile(backgroundPath);
+  const document = await PDFDocument.create();
+  const page = document.addPage([pageWidth, pageHeight]);
+  const background = await document.embedPng(backgroundBytes);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
   const regular = await document.embedFont(StandardFonts.Helvetica);
   const qrData = await QRCode.toDataURL(String(record.clave || ""), { errorCorrectionLevel: "M", margin: 1, width: 320 });
   const qrImage = await document.embedPng(qrData);
 
-  drawCenteredValue(page, bold, record.clave, 520, 447, 270, 22);
-  drawValue(page, bold, record.nombre_comercial, 255, 359, 545, 16);
-  drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 255, 339, 545, 9);
-  drawValue(page, bold, record.domicilio, 255, 286, 500, 11);
-  drawValue(page, regular, record.municipio, 255, 267, 500, 10);
-  drawValue(page, bold, record.giro, 255, 220, 455, 13);
-  drawValue(page, bold, formatRegistrationDate(record.fecha_inscripcion), 48, 108, 180, 11);
-  drawValue(page, bold, formatDate(expirationDate(record.fecha_vigencia_base)), 255, 108, 150, 11);
-  page.drawImage(qrImage, { x: 660, y: 71, width: 102, height: 102 });
+  page.drawImage(background, { x: 0, y: 0, width: pageWidth, height: pageHeight });
+  drawCenteredValue(page, bold, record.clave, 700, 618, 320, 27);
+  drawValue(page, bold, record.nombre_comercial, 310, 492, 700, 27);
+  drawValue(page, regular, record.rfc ? `RFC: ${record.rfc}` : "", 310, 461, 700, 15);
+  drawValue(page, bold, record.domicilio, 310, 428, 700, 16);
+  drawValue(page, regular, record.municipio, 310, 400, 700, 15);
+  drawValue(page, bold, record.giro, 300, 278, 700, 20);
+  drawValue(page, bold, formatRegistrationDate(record.fecha_inscripcion), 300, 226, 230, 18);
+  drawValue(page, bold, formatDate(expirationDate(record.fecha_vigencia_base)), 300, 194, 230, 18);
+  page.drawImage(qrImage, { x: 885, y: 86, width: 135, height: 135 });
   const seal = String(record.cadena_aprobacion || "");
-  page.drawText(seal.slice(0, 48), { x: 430, y: 69, size: 5.1, font: regular, color: gray });
-  page.drawText(seal.slice(48), { x: 430, y: 61.5, size: 5.1, font: regular, color: gray });
+  page.drawText("SELLO DIGITAL", { x: 590, y: 105, size: 7, font: bold, color: gray });
+  page.drawText(seal.slice(0, 48), { x: 590, y: 91, size: 5.1, font: regular, color: gray });
+  page.drawText(seal.slice(48), { x: 590, y: 82, size: 5.1, font: regular, color: gray });
 
   document.setTitle(`Cédula RET ${record.clave}`);
   document.setSubject("Constancia de aprobación del Registro Estatal de Turismo");
