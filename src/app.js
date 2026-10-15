@@ -31,6 +31,8 @@ const decodeLegacyHtmlEntities = (value) => {
     .trim();
 };
 
+const validApprovalToken = (value) => /^\d{13}\.[a-f0-9]{64}$/i.test(value) || /^[A-Za-z0-9_-]{64,256}$/.test(value);
+
 const app = express();
 app.set("trust proxy", "loopback");
 const uploadsRoot = path.resolve(__dirname, "../uploads");
@@ -619,7 +621,7 @@ app.get("/api/cedulas/verificar/:clave/:cadena", publicMapLimiter, async (req, r
   try {
     const clave = String(req.params.clave || "").trim().toUpperCase();
     const cadena = String(req.params.cadena || "").trim();
-    if (!/^RET[A-Z0-9-]{4,40}$/.test(clave) || !/^\d{13}\.[a-f0-9]{64}$/i.test(cadena)) {
+    if (!/^RET[A-Z0-9-]{4,40}$/.test(clave) || !validApprovalToken(cadena)) {
       return res.status(400).json({ success: false, message: "Los datos de verificación no son válidos" });
     }
     const [[record]] = await pool.execute(
@@ -661,7 +663,7 @@ app.get("/api/cedulas/verificar/:clave/:cadena", publicMapLimiter, async (req, r
 app.get("/api/cedulas/verificar/:cadena", publicMapLimiter, async (req, res, next) => {
   try {
     const cadena = String(req.params.cadena || "").trim();
-    if (!/^\d{13}\.[a-f0-9]{64}$/i.test(cadena)) return res.status(400).json({ success: false, message: "Sello digital no válido" });
+    if (!validApprovalToken(cadena)) return res.status(400).json({ success: false, message: "Sello digital no válido" });
     const [[record]] = await pool.execute(
       `SELECT d.clave, d.nombre_comercial, g.giro, m.municipio
        FROM ret_datos_generales d
