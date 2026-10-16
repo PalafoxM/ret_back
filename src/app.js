@@ -370,7 +370,7 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
   const [rows] = await executor.execute(
     `SELECT d.clave, d.nombre_comercial, d.info_rfc, d.rfc_empresa, d.correo,
       d.calle, d.numero, d.interior, d.colonia, d.cp, d.fecha_registro,
-      d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
+      d.visible, d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
       (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
        AND COALESCE(d.renovar, 0) = 0) AS es_vencido,
       g.giro, m.municipio, u.email AS cuenta_email
@@ -570,9 +570,9 @@ app.post("/api/admin/tramites/:clave/observaciones", requireAdmin, async (req, r
       return res.status(404).json({ success: false, message: "No se encontró el registro" });
     }
     const expired = Number(record.es_vencido) === 1;
-    if (!expired && (Number(record.concluido) !== 1 || Number(record.aprobado) === 1)) {
+    if (Number(record.visible) !== 1 || (!expired && Number(record.aprobado) === 1)) {
       await connection.rollback();
-      return res.status(409).json({ success: false, message: "Solo se pueden observar trámites concluidos pendientes de aprobación o vencidos" });
+      return res.status(409).json({ success: false, message: "Solo se pueden observar trámites pendientes, concluidos para validar o vencidos" });
     }
     await connection.execute(
       `UPDATE ret_datos_generales SET concluido = 0, aprobado = 0, renovar = 0,
