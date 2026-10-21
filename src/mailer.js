@@ -140,4 +140,32 @@ const sendReviewObservations = async ({ to, clave, nombreComercial, observations
   });
 };
 
-module.exports = { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations };
+const sendRenewalActivation = async ({ to, clave, nombreComercial }) => {
+  const safeName = escapeHtml(nombreComercial || "establecimiento");
+  const safeClave = escapeHtml(clave);
+  const configuredUrl = String(process.env.PUBLIC_WEB_URL || "").trim();
+  const loginUrl = /^https?:\/\//i.test(configuredUrl) ? configuredUrl.replace(/\/$/, "") : "";
+  const loginText = loginUrl ? `\n\nIngresa en: ${loginUrl}` : "";
+  const loginButton = loginUrl
+    ? `<p style="margin:26px 0"><a href="${escapeHtml(loginUrl)}" style="display:inline-block;padding:13px 22px;border-radius:9px;background:#0878b9;color:#fff;text-decoration:none;font-weight:bold">Ingresar al sistema RET</a></p>`
+    : "";
+  return getTransporter().sendMail({
+    from: process.env.MAIL_FROM || process.env.MAIL_USER,
+    to,
+    subject: "Trámite RET / RENOVACIÓN ACTIVADA",
+    text: `Hola ${nombreComercial || "establecimiento"},\n\nLa renovación del registro ${clave} fue activada. Ya puedes ingresar al sistema RET con tus credenciales habituales para actualizar los Datos Generales de tu establecimiento.${loginText}\n\nCuando termines, guarda la información para continuar con el trámite de renovación.`,
+    html: `
+      <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
+        <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
+          <div style="padding:24px 30px;background:linear-gradient(110deg,#00abc8,#0878b9);color:#fff"><strong style="font-size:22px">Renovación RET activada</strong></div>
+          <div style="padding:30px"><p style="margin-top:0">Hola <strong>${safeName}</strong>:</p>
+            <p>La renovación del registro <strong>${safeClave}</strong> fue activada.</p>
+            <p>Ya puedes ingresar al sistema RET con tus credenciales habituales para actualizar los <strong>Datos Generales</strong> de tu establecimiento.</p>
+            ${loginButton}
+            <p style="margin-bottom:0;font-size:13px;color:#617887">Cuando termines, guarda la información para continuar con el trámite de renovación.</p></div>
+        </div>
+      </div>`,
+  });
+};
+
+module.exports = { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations, sendRenewalActivation };

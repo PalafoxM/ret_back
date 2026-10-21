@@ -12,7 +12,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const pool = require("./db");
-const { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations } = require("./mailer");
+const { sendRegistrationCredentials, sendPasswordRecovery, sendApprovalCertificate, sendReviewObservations, sendRenewalActivation } = require("./mailer");
 const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
@@ -756,6 +756,66 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const total = Number(countRows[0]?.total || 0);
     res.status(200).json({ success: true, data: { rows, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) } });
   } catch (error) { next(error); }
+});
+
+app.post("/api/admin/tramites/:clave/activar-renovacion", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[record]] = await connection.execute(
+      `SELECT d.clave, d.nombre_comercial, d.correo, d.renovar,
+        (SELECT u.email FROM ret_usr u WHERE u.id = d.clave ORDER BY u.activo DESC, u.id_usr DESC LIMIT 1) AS usuario_correo,
+        (SELECT u.id_usr FROM ret_usr u WHERE u.id = d.clave ORDER BY u.activo DESC, u.id_usr DESC LIMIT 1) AS id_usuario
+       FROM ret_datos_generales d WHERE d.clave = ? LIMIT 1 FOR UPDATE`,
+      [clave],
+    );
+    if (!record) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "No se encontró el registro" });
+    }
+    if (Number(record.renovar) !== 1) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "Solo se pueden activar registros con estatus Renovación" });
+    }
+    if (!record.id_usuario) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "El registro no tiene un usuario de acceso asociado" });
+    }
+    await connection.execute(
+      `UPDATE ret_datos_generales
+       SET renovar = 0, concluido = 0, aprobado = 0, visible = 1, porcentaje_registro = 10
+       WHERE clave = ?`,
+      [clave],
+    );
+    await connection.execute(
+      "UPDATE ret_usr SET activo = 1, porcentaje_registro = 10, fecha_renovacion = CURRENT_TIMESTAMP WHERE id_usr = ?",
+      [record.id_usuario],
+    );
+    await connection.commit();
+
+    const recipient = String(record.usuario_correo || record.correo || "").trim();
+    let emailSent = false;
+    if (recipient) {
+      try {
+        await sendRenewalActivation({ to: recipient, clave, nombreComercial: record.nombre_comercial });
+        emailSent = true;
+      } catch (mailError) {
+        console.error("No fue posible enviar la activación de renovación RET:", mailError.code || mailError.message);
+      }
+    }
+    const message = emailSent
+      ? "Renovación activada y aviso enviado por correo"
+      : "La renovación fue activada, pero no fue posible enviar el correo";
+    return res.status(200).json({ success: true, message, data: { clave, emailSent } });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
 app.get("/api/admin/usuarios", requireAdmin, async (req, res, next) => {
