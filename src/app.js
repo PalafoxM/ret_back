@@ -515,7 +515,9 @@ app.get("/api/admin/tramites/:clave/expediente", requireAdmin, async (req, res, 
         CASE WHEN d.fecha_registro IS NOT NULL
           AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
           AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
-          WHEN d.aprobado = 1 THEN 'Aprobado'
+          WHEN d.concluido = 1 AND d.aprobado = 1 AND d.giro <> 0 AND d.municipio <> 0
+            AND d.fecha_registro IS NOT NULL
+            AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) <= 1095 THEN 'Aprobado'
           WHEN d.renovar = 1 THEN 'Renovación'
           WHEN d.concluido = 1 THEN 'Concluido'
           ELSE 'Pendiente' END AS estatus
@@ -687,8 +689,9 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
           AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0)) AS pendientes,
         SUM(visible = 1 AND concluido = 1 AND COALESCE(aprobado, 0) = 0 AND COALESCE(renovar, 0) = 0
           AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095)) AS concluidos,
-        SUM(visible = 1 AND aprobado = 1
-          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0)) AS aprobados,
+        (SELECT COUNT(*) FROM vw_usr_datos v
+          WHERE v.visible = 1 AND v.concluido = 1 AND v.aprobado = 1
+            AND v.giro <> 0 AND v.municipio <> 0) AS aprobados,
         SUM(visible = 1 AND renovar = 1) AS renovaciones,
         SUM(visible = 1 AND fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0) AS vencidos
         FROM ret_datos_generales`),
@@ -724,7 +727,9 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const statusClauses = {
       Pendiente: "COALESCE(d.concluido, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0)",
       Concluido: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095)",
-      Aprobado: "d.aprobado = 1 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0)",
+      Aprobado: `EXISTS (SELECT 1 FROM vw_usr_datos v
+        WHERE v.clave = d.clave AND v.visible = 1 AND v.concluido = 1
+          AND v.aprobado = 1 AND v.giro <> 0 AND v.municipio <> 0)`,
       "Renovación": "d.renovar = 1",
       Vencido: "d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0",
     };
@@ -748,7 +753,9 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
         CASE WHEN d.fecha_registro IS NOT NULL
           AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
           AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
-          WHEN d.aprobado = 1 THEN 'Aprobado'
+          WHEN d.concluido = 1 AND d.aprobado = 1 AND d.giro <> 0 AND d.municipio <> 0
+            AND d.fecha_registro IS NOT NULL
+            AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) <= 1095 THEN 'Aprobado'
           WHEN d.renovar = 1 THEN 'Renovación'
           WHEN d.concluido = 1 THEN 'Concluido' ELSE 'Pendiente' END AS estatus
         ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
