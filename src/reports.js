@@ -1,11 +1,11 @@
 const writeXlsxFile = require("write-excel-file/node");
-const { renewalCondition, approvedRegistryCondition, concludedCondition, pendingCondition } = require("./status");
+const { renewalCondition, concludedCondition, pendingCondition } = require("./status");
 
 const STATE_REPORTS = Object.freeze({
   activos: { title: "Total de registros", where: "d.visible = 1" },
   pendientes: { title: "Trámites pendientes", where: `d.visible = 1 AND ${pendingCondition("d")}` },
   concluidos: { title: "Concluidos para validar", where: `d.visible = 1 AND ${concludedCondition("d")}` },
-  aprobados: { title: "Registros aprobados", where: `d.visible = 1 AND ${approvedRegistryCondition("d")}` },
+  aprobados: { title: "Registros aprobados", where: "d.visible = 1 AND COALESCE(d.aprobado, 0) = 1" },
   renovaciones: { title: "Trámites en renovación", where: `d.visible = 1 AND ${renewalCondition("d")}` },
 });
 

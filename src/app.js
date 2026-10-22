@@ -17,7 +17,7 @@ const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
 const { assessLogin } = require("./recaptcha");
-const { renewalCondition, approvedRegistryCondition, concludedCondition, pendingCondition, statusCase } = require("./status");
+const { renewalCondition, concludedCondition, pendingCondition, statusCase } = require("./status");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -716,7 +716,7 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
         SUM(d.visible = 1 AND DATE(d.fecha_registro) = CURRENT_DATE()) AS hoy,
         SUM(d.visible = 1 AND ${pendingCondition("d")}) AS pendientes,
         SUM(d.visible = 1 AND ${concludedCondition("d")}) AS concluidos,
-        SUM(d.visible = 1 AND ${approvedRegistryCondition("d")}) AS aprobados,
+        SUM(d.visible = 1 AND COALESCE(d.aprobado, 0) = 1) AS aprobados,
         SUM(d.visible = 1 AND ${renewalCondition("d")}) AS renovaciones
         FROM ret_datos_generales d`),
       pool.query(`SELECT COALESCE(g.giro, 'Sin especificar') AS label, COUNT(*) AS total
@@ -751,7 +751,7 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const statusClauses = {
       Pendiente: pendingCondition("d"),
       Concluido: concludedCondition("d"),
-      Aprobado: approvedRegistryCondition("d"),
+      Aprobado: "COALESCE(d.aprobado, 0) = 1",
       "Renovación": renewalCondition("d"),
     };
     const filters = ["d.visible = 1"];
