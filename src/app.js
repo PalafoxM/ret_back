@@ -554,7 +554,7 @@ app.get("/api/admin/tramites/:clave/documentos/:field", requireAdmin, async (req
   try {
     const [[row]] = await pool.query("SELECT ?? AS file_path FROM ret_archivo_legal WHERE clave = ? LIMIT 1", [field, req.params.clave]);
     if (!row?.file_path) return res.status(404).json({ success: false, message: "Archivo no encontrado" });
-    await sendStoredObject(res, row.file_path, `${field}-${req.params.clave}${path.extname(row.file_path) || ""}`);
+    await sendStoredObject(res, row.file_path, `${field}-${req.params.clave}${path.extname(row.file_path) || ""}`, true);
   } catch (error) { next(error); }
 });
 
