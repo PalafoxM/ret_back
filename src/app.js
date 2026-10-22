@@ -186,6 +186,42 @@ const requireAdmin = (req, res, next) => {
   }
 };
 
+const adminSessionRequiredUrl = () => {
+  const configuredUrl = String(process.env.PUBLIC_WEB_URL || "").trim();
+  try {
+    const target = new URL(configuredUrl || "http://localhost/");
+    target.pathname = target.pathname.replace(/\/$/, "") || "/";
+    target.search = "";
+    target.searchParams.set("motivo", "sesion-administrativa-requerida");
+    target.hash = "";
+    return configuredUrl ? target.toString() : `${target.pathname}${target.search}`;
+  } catch {
+    return "/?motivo=sesion-administrativa-requerida";
+  }
+};
+
+const rejectAdminDocumentRequest = (req, res, message) => {
+  const directNavigation = req.get("Sec-Fetch-Mode") === "navigate" || String(req.get("Accept") || "").includes("text/html");
+  if (directNavigation) return res.redirect(302, adminSessionRequiredUrl());
+  return res.status(401).json({ success: false, message });
+};
+
+const requireAdminDocument = (req, res, next) => {
+  const secret = getJwtSecret();
+  if (!secret) return res.status(503).json({ success: false, message: "La autenticación no está configurada" });
+  const token = req.cookies[ADMIN_SESSION_COOKIE];
+  if (!token) return rejectAdminDocumentRequest(req, res, "Sesión administrativa requerida");
+  try {
+    const payload = jwt.verify(token, secret, { algorithms: ["HS256"], issuer: "ret-api", audience: "ret-admin" });
+    if (payload.role !== "admin") throw new Error("Invalid admin role");
+    req.admin = payload;
+    next();
+  } catch {
+    res.clearCookie(ADMIN_SESSION_COOKIE, { path: "/" });
+    return rejectAdminDocumentRequest(req, res, "La sesión administrativa expiró o no es válida");
+  }
+};
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
@@ -548,7 +584,7 @@ app.get("/api/admin/tramites/:clave/expediente", requireAdmin, async (req, res, 
   } catch (error) { next(error); }
 });
 
-app.get("/api/admin/tramites/:clave/documentos/:field", requireAdmin, async (req, res, next) => {
+app.get("/api/admin/tramites/:clave/documentos/:field", requireAdminDocument, async (req, res, next) => {
   const field = String(req.params.field || "");
   if (!ADMIN_DOCUMENT_FIELDS[field]) return res.status(404).json({ success: false, message: "Documento no válido" });
   try {
