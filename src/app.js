@@ -17,6 +17,7 @@ const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
 const { assessLogin } = require("./recaptcha");
+const { renewalCondition, approvedRegistryCondition, concludedCondition, pendingCondition, statusCase } = require("./status");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -548,15 +549,7 @@ app.get("/api/admin/tramites/:clave/expediente", requireAdmin, async (req, res, 
     const clave = String(req.params.clave || "").trim().toUpperCase();
     const [[general]] = await pool.execute(
       `SELECT d.*, g.giro AS giro_nombre, m.municipio AS municipio_nombre,
-        CASE WHEN d.fecha_registro IS NOT NULL
-          AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
-          AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
-          WHEN d.concluido = 1 AND d.aprobado = 1 AND d.giro <> 0 AND d.municipio <> 0
-            AND d.fecha_registro IS NOT NULL
-            AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) <= 1095 THEN 'Aprobado'
-          WHEN d.renovar = 1 THEN 'Renovación'
-          WHEN d.concluido = 1 THEN 'Concluido'
-          ELSE 'Pendiente' END AS estatus
+        ${statusCase("d")} AS estatus
        FROM ret_datos_generales d
        LEFT JOIN ret_giro g ON g.id_giro = d.giro
        LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
@@ -719,18 +712,13 @@ app.get("/api/admin/dashboard", requireAdmin, async (req, res, next) => {
   try {
     const [[metricsRows], [byGiro], [byMunicipio], [activityRows]] = await Promise.all([
       pool.query(`SELECT
-        SUM(visible = 1) AS activos,
-        SUM(visible = 1 AND DATE(fecha_registro) = CURRENT_DATE()) AS hoy,
-        SUM(visible = 1 AND COALESCE(concluido, 0) = 0
-          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0)) AS pendientes,
-        SUM(visible = 1 AND concluido = 1 AND COALESCE(aprobado, 0) = 0 AND COALESCE(renovar, 0) = 0
-          AND NOT (fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095)) AS concluidos,
-        (SELECT COUNT(*) FROM vw_usr_datos v
-          WHERE v.visible = 1 AND v.concluido = 1 AND v.aprobado = 1
-            AND v.giro <> 0 AND v.municipio <> 0) AS aprobados,
-        SUM(visible = 1 AND renovar = 1) AS renovaciones,
-        SUM(visible = 1 AND fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095 AND COALESCE(renovar, 0) = 0) AS vencidos
-        FROM ret_datos_generales`),
+        SUM(d.visible = 1) AS total_registros,
+        SUM(d.visible = 1 AND DATE(d.fecha_registro) = CURRENT_DATE()) AS hoy,
+        SUM(d.visible = 1 AND ${pendingCondition("d")}) AS pendientes,
+        SUM(d.visible = 1 AND ${concludedCondition("d")}) AS concluidos,
+        SUM(d.visible = 1 AND ${approvedRegistryCondition("d")}) AS aprobados,
+        SUM(d.visible = 1 AND ${renewalCondition("d")}) AS renovaciones
+        FROM ret_datos_generales d`),
       pool.query(`SELECT COALESCE(g.giro, 'Sin especificar') AS label, COUNT(*) AS total
         FROM ret_datos_generales d LEFT JOIN ret_giro g ON g.id_giro = d.giro
         WHERE d.visible = 1 GROUP BY d.giro, g.giro ORDER BY total DESC LIMIT 6`),
@@ -761,13 +749,10 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const search = String(req.query.search || "").trim().slice(0, 100);
     const status = String(req.query.status || "").trim();
     const statusClauses = {
-      Pendiente: "COALESCE(d.concluido, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0)",
-      Concluido: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0 AND NOT (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095)",
-      Aprobado: `EXISTS (SELECT 1 FROM vw_usr_datos v
-        WHERE v.clave = d.clave AND v.visible = 1 AND v.concluido = 1
-          AND v.aprobado = 1 AND v.giro <> 0 AND v.municipio <> 0)`,
-      "Renovación": "d.renovar = 1",
-      Vencido: "d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0",
+      Pendiente: pendingCondition("d"),
+      Concluido: concludedCondition("d"),
+      Aprobado: approvedRegistryCondition("d"),
+      "Renovación": renewalCondition("d"),
     };
     const filters = ["d.visible = 1"];
     const params = [];
@@ -785,15 +770,7 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const [[countRows], [rows]] = await Promise.all([
       pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
       pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro,
-        g.giro, m.municipio,
-        CASE WHEN d.fecha_registro IS NOT NULL
-          AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
-          AND COALESCE(d.renovar, 0) = 0 THEN 'Vencido'
-          WHEN d.concluido = 1 AND d.aprobado = 1 AND d.giro <> 0 AND d.municipio <> 0
-            AND d.fecha_registro IS NOT NULL
-            AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) <= 1095 THEN 'Aprobado'
-          WHEN d.renovar = 1 THEN 'Renovación'
-          WHEN d.concluido = 1 THEN 'Concluido' ELSE 'Pendiente' END AS estatus
+        g.giro, m.municipio, ${statusCase("d")} AS estatus
         ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
     ]);
     const total = Number(countRows[0]?.total || 0);
@@ -810,6 +787,7 @@ app.post("/api/admin/tramites/:clave/activar-renovacion", requireAdmin, async (r
     await connection.beginTransaction();
     const [[record]] = await connection.execute(
       `SELECT d.clave, d.nombre_comercial, d.correo, d.renovar,
+        ${renewalCondition("d")} AS es_renovacion,
         (SELECT u.email FROM ret_usr u WHERE u.id = d.clave ORDER BY u.activo DESC, u.id_usr DESC LIMIT 1) AS usuario_correo,
         (SELECT u.id_usr FROM ret_usr u WHERE u.id = d.clave ORDER BY u.activo DESC, u.id_usr DESC LIMIT 1) AS id_usuario
        FROM ret_datos_generales d WHERE d.clave = ? LIMIT 1 FOR UPDATE`,
@@ -819,7 +797,7 @@ app.post("/api/admin/tramites/:clave/activar-renovacion", requireAdmin, async (r
       await connection.rollback();
       return res.status(404).json({ success: false, message: "No se encontró el registro" });
     }
-    if (Number(record.renovar) !== 1) {
+    if (Number(record.es_renovacion) !== 1) {
       await connection.rollback();
       return res.status(409).json({ success: false, message: "Solo se pueden activar registros con estatus Renovación" });
     }

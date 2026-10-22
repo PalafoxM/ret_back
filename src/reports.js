@@ -1,12 +1,12 @@
 const writeXlsxFile = require("write-excel-file/node");
+const { renewalCondition, approvedRegistryCondition, concludedCondition, pendingCondition } = require("./status");
 
 const STATE_REPORTS = Object.freeze({
-  activos: { title: "Registros activos", where: "u.activo = 1" },
-  pendientes: { title: "Trámites pendientes", where: "COALESCE(d.concluido, 0) = 0" },
-  concluidos: { title: "Concluidos para validar", where: "d.concluido = 1 AND COALESCE(d.aprobado, 0) = 0 AND COALESCE(d.renovar, 0) = 0" },
-  aprobados: { title: "Registros aprobados", where: "d.aprobado = 1" },
-  renovaciones: { title: "Trámites en renovación", where: "d.renovar = 1" },
-  vencidos: { title: "Registros vencidos", where: "d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095 AND COALESCE(d.renovar, 0) = 0" },
+  activos: { title: "Total de registros", where: "d.visible = 1" },
+  pendientes: { title: "Trámites pendientes", where: `d.visible = 1 AND ${pendingCondition("d")}` },
+  concluidos: { title: "Concluidos para validar", where: `d.visible = 1 AND ${concludedCondition("d")}` },
+  aprobados: { title: "Registros aprobados", where: `d.visible = 1 AND ${approvedRegistryCondition("d")}` },
+  renovaciones: { title: "Trámites en renovación", where: `d.visible = 1 AND ${renewalCondition("d")}` },
 });
 
 const APP_REPORTS = Object.freeze({
@@ -36,7 +36,7 @@ const queryReport = async (pool, type) => {
       d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
       d.concluido, d.aprobado, d.renovar, d.visible, d.observaciones
       FROM ret_datos_generales d
-      LEFT JOIN ret_usr u ON u.id = d.clave
+      LEFT JOIN (SELECT id, MAX(email) AS email FROM ret_usr GROUP BY id) u ON u.id = d.clave
       LEFT JOIN ret_giro g ON g.id_giro = d.giro
       LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
       WHERE ${config.where}
