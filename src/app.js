@@ -410,12 +410,13 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
       d.visible, d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
       (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
        AND COALESCE(d.renovar, 0) = 0) AS es_vencido,
-      g.giro, m.municipio, u.email AS cuenta_email
+      g.giro, m.municipio, u.email AS cuenta_email, u.fecha_renovacion
      FROM ret_datos_generales d
      LEFT JOIN ret_giro g ON g.id_giro = d.giro
      LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
      LEFT JOIN ret_archivo_legal a ON a.clave = d.clave
-     LEFT JOIN (SELECT id, MAX(email) AS email FROM ret_usr WHERE activo = 1 GROUP BY id) u ON u.id = d.clave
+     LEFT JOIN (SELECT id, MAX(email) AS email, MAX(fecha_renovacion) AS fecha_renovacion
+       FROM ret_usr WHERE activo = 1 GROUP BY id) u ON u.id = d.clave
      WHERE d.clave = ? LIMIT 1${lock ? " FOR UPDATE" : ""}`,
     [clave],
   );
@@ -428,10 +429,11 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
     [clave],
   );
   const row = rows[0];
+  const certificateDate = row.fecha_renovacion || viewRows[0]?.dg_fecha_registro || null;
   return {
     ...row,
-    fecha_inscripcion: viewRows[0]?.dg_fecha_registro_alt || "",
-    fecha_vigencia_base: viewRows[0]?.dg_fecha_registro || null,
+    fecha_inscripcion: row.fecha_renovacion || viewRows[0]?.dg_fecha_registro_alt || "",
+    fecha_vigencia_base: certificateDate,
     correo: row.correo || row.cuenta_email || "",
     rfc: row.info_rfc || row.rfc_empresa || "",
     domicilio: [row.calle, row.numero, row.interior ? `Int. ${row.interior}` : "", row.colonia, row.cp ? `C.P. ${row.cp}` : ""].filter(Boolean).join(", "),
@@ -474,19 +476,25 @@ app.post("/api/admin/tramites/:clave/aprobar", requireAdmin, async (req, res, ne
       return res.status(409).json({ success: false, message: "El registro ya se encuentra aprobado" });
     }
     const approvedAt = new Date();
+    const isRenewalApproval = Boolean(record.fecha_renovacion);
     const approvalSeal = createApprovalSeal({ clave, approvedAt: approvedAt.toISOString() });
     const pdf = await generateCedulaRet({
       ...record,
+      fecha_inscripcion: isRenewalApproval ? approvedAt : record.fecha_inscripcion,
+      fecha_vigencia_base: isRenewalApproval ? approvedAt : record.fecha_vigencia_base,
       cadena_aprobacion: approvalSeal,
       fecha_aprobacion: approvedAt,
       verificationUrl: publicVerificationUrl(clave, approvalSeal),
     });
-    uploadedCedulaKey = `${S3_PREFIX}/${clave}/cedulas/Cedula-RET-${clave}.pdf`;
+    uploadedCedulaKey = `${S3_PREFIX}/${clave}/cedulas/Cedula-RET-${clave}-${approvedAt.getTime()}.pdf`;
     await putS3Object({ key: uploadedCedulaKey, body: pdf, contentType: "application/pdf", filename: `Cedula-RET-${clave}.pdf` });
     await connection.execute(
       `UPDATE ret_datos_generales SET concluido = 1, aprobado = 1, renovar = 0, cadena_aprobacion = ? WHERE clave = ?`,
       [approvalSeal, clave],
     );
+    if (isRenewalApproval) {
+      await connection.execute("UPDATE ret_usr SET fecha_renovacion = ? WHERE id = ?", [approvedAt, clave]);
+    }
     await connection.execute("UPDATE ret_archivo_legal SET cedula_ret = ? WHERE clave = ?", [uploadedCedulaKey, clave]);
     await connection.commit();
     let emailSent = false;
@@ -656,12 +664,12 @@ app.get("/api/cedulas/verificar/:clave/:cadena", publicMapLimiter, async (req, r
       return res.status(400).json({ success: false, message: "Los datos de verificación no son válidos" });
     }
     const [[record]] = await pool.execute(
-      `SELECT clave, nombre_comercial, calle, numero, interior, colonia, cp,
-        municipio_nombre AS municipio, g_giro AS giro,
-        SUBSTRING_INDEX(dg_fecha_registro_alt, ' ', 1) AS fecha_inscripcion,
-        DATE_FORMAT(DATE_ADD(dg_fecha_registro, INTERVAL 3 YEAR), '%d/%m/%Y') AS vigencia
-       FROM vw_usr_datos
-       WHERE clave = ? AND cadena_aprobacion = ? AND aprobado = 1 AND visible = 1
+      `SELECT v.clave, v.nombre_comercial, v.calle, v.numero, v.interior, v.colonia, v.cp,
+        v.municipio_nombre AS municipio, v.g_giro AS giro,
+        DATE_FORMAT(COALESCE((SELECT MAX(u.fecha_renovacion) FROM ret_usr u WHERE u.id = v.clave), v.dg_fecha_registro), '%d/%m/%Y') AS fecha_inscripcion,
+        DATE_FORMAT(DATE_ADD(COALESCE((SELECT MAX(u.fecha_renovacion) FROM ret_usr u WHERE u.id = v.clave), v.dg_fecha_registro), INTERVAL 3 YEAR), '%d/%m/%Y') AS vigencia
+       FROM vw_usr_datos v
+       WHERE v.clave = ? AND v.cadena_aprobacion = ? AND v.aprobado = 1 AND v.visible = 1
        LIMIT 1`,
       [clave, cadena],
     );
