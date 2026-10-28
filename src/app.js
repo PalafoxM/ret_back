@@ -2762,12 +2762,29 @@ app.post("/api/form/encuesta", requireAuth, async (req, res, next) => {
 app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
   try {
     const giro = Number.parseInt(req.query.giro || "1", 10);
+    const municipio = req.query.municipio ? Number.parseInt(req.query.municipio, 10) : 0;
+    const busqueda = String(req.query.busqueda || "").trim().slice(0, 100);
     if (!Number.isInteger(giro) || giro < 1) {
       return res.status(400).json({ success: false, message: "El giro no es válido" });
     }
+    if (!Number.isInteger(municipio) || municipio < 0) {
+      return res.status(400).json({ success: false, message: "El municipio no es válido" });
+    }
+    const conditions = ["visible = 1", "giro = ?"];
+    const parameters = [giro];
+    if (municipio > 0) {
+      conditions.push("municipio = ?");
+      parameters.push(municipio);
+    }
+    if (busqueda) {
+      conditions.push("(nombre_comercial LIKE ? OR descripcion LIKE ?)");
+      const pattern = `%${busqueda}%`;
+      parameters.push(pattern, pattern);
+    }
     const [rows] = await pool.execute(
-      "SELECT nombre_comercial, latitud, longitud, descripcion FROM ret_datos_generales WHERE visible = 1 AND giro = ?",
-      [giro],
+      `SELECT nombre_comercial, latitud, longitud, descripcion
+       FROM ret_datos_generales WHERE ${conditions.join(" AND ")}`,
+      parameters,
     );
 
     const data = rows
