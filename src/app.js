@@ -2770,20 +2770,24 @@ app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
     if (!Number.isInteger(municipio) || municipio < 0) {
       return res.status(400).json({ success: false, message: "El municipio no es válido" });
     }
-    const conditions = ["visible = 1", "giro = ?"];
+    const conditions = ["d.visible = 1", "d.giro = ?"];
     const parameters = [giro];
     if (municipio > 0) {
-      conditions.push("municipio = ?");
+      conditions.push("d.municipio = ?");
       parameters.push(municipio);
     }
     if (busqueda) {
-      conditions.push("(nombre_comercial LIKE ? OR descripcion LIKE ?)");
+      conditions.push("(d.nombre_comercial LIKE ? OR d.descripcion LIKE ?)");
       const pattern = `%${busqueda}%`;
       parameters.push(pattern, pattern);
     }
     const [rows] = await pool.execute(
-      `SELECT nombre_comercial, latitud, longitud, descripcion
-       FROM ret_datos_generales WHERE ${conditions.join(" AND ")}`,
+      `SELECT d.nombre_comercial, d.latitud, d.longitud, d.descripcion,
+        NULLIF(TRIM(d.telefono_comercial), '') AS telefono_comercial,
+        NULLIF(TRIM(d.telefono2), '') AS telefono2,
+        NULLIF(TRIM(CONCAT_WS(' ', NULLIF(d.calle, ''), NULLIF(d.numero, ''))), '') AS direccion
+       FROM ret_datos_generales d
+       WHERE ${conditions.join(" AND ")}`,
       parameters,
     );
 
