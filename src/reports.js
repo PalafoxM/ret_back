@@ -24,6 +24,7 @@ const safeCellValue = (value) => {
 
 const humanize = (field) => ({
   clave: "Clave RET", nombre_comercial: "Nombre comercial", giro: "Giro", municipio: "Municipio",
+  nombre_representante: "Nombre del representante",
   correo: "Correo", fecha_registro: "Fecha de registro", porcentaje_registro: "Porcentaje de registro",
   concluido: "Concluido", aprobado: "Aprobado", renovar: "Renovación", visible: "Visible",
 }[field] || field.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()));
@@ -32,6 +33,7 @@ const queryReport = async (pool, type) => {
   if (STATE_REPORTS[type]) {
     const config = STATE_REPORTS[type];
     const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
+      COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
       COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
       d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
       d.concluido, d.aprobado, d.renovar, d.visible, d.observaciones
@@ -46,6 +48,7 @@ const queryReport = async (pool, type) => {
   const config = APP_REPORTS[type];
   if (!config) return null;
   const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
+    COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
     COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
     d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
     d.concluido, d.aprobado, d.renovar, d.visible, ${config.alias}.*
