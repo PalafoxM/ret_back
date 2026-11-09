@@ -64,7 +64,7 @@ const sendStoredObject = async (res, storedPath, filename, inline = false) => {
 };
 const legalUpload = multer({
   dest: temporaryUploads,
-  limits: { fileSize: 10 * 1024 * 1024, files: 9 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 9 },
   fileFilter: (req, file, callback) => callback(null, ["application/pdf", "image/png", "image/jpeg"].includes(file.mimetype)),
 });
 const LEGAL_FIELDS = Object.freeze({
@@ -78,7 +78,7 @@ const GRAPHIC_FIELDS = Object.freeze({
 });
 const graphicUpload = multer({
   dest: temporaryUploads,
-  limits: { fileSize: 10 * 1024 * 1024, files: 5 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 5 },
   fileFilter: (req, file, callback) => callback(null, ["image/png", "image/jpeg"].includes(file.mimetype)),
 });
 const getImageDimensions = (buffer, mimeType) => {
@@ -2815,7 +2815,7 @@ app.use((error, req, res, next) => {
   console.error(error);
   if (error instanceof multer.MulterError) {
     const message = error.code === "LIMIT_FILE_SIZE"
-      ? "Cada archivo debe pesar menos de 10 MB"
+      ? "Cada archivo puede pesar como máximo 20 MB"
       : "No fue posible procesar los archivos adjuntos";
     return res.status(400).json({ success: false, message });
   }
