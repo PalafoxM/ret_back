@@ -25,6 +25,7 @@ const safeCellValue = (value) => {
 const humanize = (field) => ({
   clave: "Clave RET", nombre_comercial: "Nombre comercial", giro: "Giro", municipio: "Municipio",
   nombre_representante: "Nombre del representante",
+  instalaciones_discapacidad: "Instalaciones para personas con discapacidad",
   correo: "Correo", fecha_registro: "Fecha de registro", porcentaje_registro: "Porcentaje de registro",
   concluido: "Concluido", aprobado: "Aprobado", renovar: "Renovación", visible: "Visible",
 }[field] || field.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()));
@@ -34,11 +35,13 @@ const queryReport = async (pool, type) => {
     const config = STATE_REPORTS[type];
     const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
       COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
+      COALESCE(NULLIF(t.inst_disca, ''), 'NO') AS instalaciones_discapacidad,
       COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
       d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
       d.concluido, d.aprobado, d.renovar, d.visible, d.observaciones
       FROM ret_datos_generales d
       LEFT JOIN (SELECT id, MAX(email) AS email FROM ret_usr GROUP BY id) u ON u.id = d.clave
+      LEFT JOIN (SELECT clave, MAX(inst_disca) AS inst_disca FROM ret_frm_tecnicos GROUP BY clave) t ON t.clave = d.clave
       LEFT JOIN ret_giro g ON g.id_giro = d.giro
       LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
       WHERE ${config.where}
@@ -49,11 +52,13 @@ const queryReport = async (pool, type) => {
   if (!config) return null;
   const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
     COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
+    COALESCE(NULLIF(t.inst_disca, ''), 'NO') AS instalaciones_discapacidad,
     COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
     d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
     d.concluido, d.aprobado, d.renovar, d.visible, ${config.alias}.*
     FROM ret_datos_generales d
     LEFT JOIN ret_usr u ON u.id = d.clave
+    LEFT JOIN (SELECT clave, MAX(inst_disca) AS inst_disca FROM ret_frm_tecnicos GROUP BY clave) t ON t.clave = d.clave
     LEFT JOIN ret_giro g ON g.id_giro = d.giro
     LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
     LEFT JOIN ?? ${config.alias} ON ${config.alias}.clave = d.clave
