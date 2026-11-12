@@ -35,13 +35,17 @@ const queryReport = async (pool, type) => {
     const config = STATE_REPORTS[type];
     const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
       COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
-      COALESCE(NULLIF(t.inst_disca, ''), 'NO') AS instalaciones_discapacidad,
+      CASE WHEN COALESCE(t.inst_disca, 0) = 1 THEN 'SI' ELSE 'NO' END AS instalaciones_discapacidad,
       COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
       d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
       d.concluido, d.aprobado, d.renovar, d.visible, d.observaciones
       FROM ret_datos_generales d
       LEFT JOIN (SELECT id, MAX(email) AS email FROM ret_usr GROUP BY id) u ON u.id = d.clave
-      LEFT JOIN (SELECT clave, MAX(inst_disca) AS inst_disca FROM ret_frm_tecnicos GROUP BY clave) t ON t.clave = d.clave
+      LEFT JOIN (
+        SELECT clave,
+          MAX(CASE WHEN UPPER(TRIM(CAST(inst_disca AS CHAR))) IN ('1', 'SI', 'SÍ', 'YES', 'TRUE') THEN 1 ELSE 0 END) AS inst_disca
+        FROM ret_frm_tecnicos GROUP BY clave
+      ) t ON t.clave = d.clave
       LEFT JOIN ret_giro g ON g.id_giro = d.giro
       LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
       WHERE ${config.where}
@@ -52,13 +56,17 @@ const queryReport = async (pool, type) => {
   if (!config) return null;
   const [rows] = await pool.query(`SELECT d.clave, d.nombre_comercial, g.giro, m.municipio,
     COALESCE(NULLIF(d.representante_moral, ''), NULLIF(d.contacto, '')) AS nombre_representante,
-    COALESCE(NULLIF(t.inst_disca, ''), 'NO') AS instalaciones_discapacidad,
+    CASE WHEN COALESCE(t.inst_disca, 0) = 1 THEN 'SI' ELSE 'NO' END AS instalaciones_discapacidad,
     COALESCE(NULLIF(d.correo, ''), u.email) AS correo, d.info_rfc AS rfc,
     d.telefono, d.fecha_inicio_operacion, d.fecha_registro, d.porcentaje_registro,
     d.concluido, d.aprobado, d.renovar, d.visible, ${config.alias}.*
     FROM ret_datos_generales d
     LEFT JOIN ret_usr u ON u.id = d.clave
-    LEFT JOIN (SELECT clave, MAX(inst_disca) AS inst_disca FROM ret_frm_tecnicos GROUP BY clave) t ON t.clave = d.clave
+    LEFT JOIN (
+      SELECT clave,
+        MAX(CASE WHEN UPPER(TRIM(CAST(inst_disca AS CHAR))) IN ('1', 'SI', 'SÍ', 'YES', 'TRUE') THEN 1 ELSE 0 END) AS inst_disca
+      FROM ret_frm_tecnicos GROUP BY clave
+    ) t ON t.clave = d.clave
     LEFT JOIN ret_giro g ON g.id_giro = d.giro
     LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
     LEFT JOIN ?? ${config.alias} ON ${config.alias}.clave = d.clave
