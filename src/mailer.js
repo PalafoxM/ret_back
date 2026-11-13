@@ -93,13 +93,14 @@ const sendPasswordRecovery = async ({ to, clave, temporaryPassword, nombreComerc
 };
 
 const sendApprovalCertificate = async ({ to, clave, nombreComercial, pdf }) => {
+  const surveyUrl = "https://encuestas.sh.guanajuato.gob.mx/#/enc/14b4846a-9e9c-5b8c-a2b3-76e9e6f74901/3110a7da-34d6-db18-fd9f-f001d5183309";
   const safeName = escapeHtml(nombreComercial || "establecimiento");
   const safeClave = escapeHtml(clave);
   return getTransporter().sendMail({
     from: process.env.MAIL_FROM || process.env.MAIL_USER,
     to,
     subject: "Trámite RET / APROBADO",
-    text: `Hola ${nombreComercial || "establecimiento"},\n\nTu trámite ${clave} fue aprobado. Adjuntamos tu Cédula RET en formato PDF.\n\nConserva este documento para futuras consultas.`,
+    text: `Hola ${nombreComercial || "establecimiento"},\n\nTu trámite ${clave} fue aprobado. Adjuntamos tu Cédula RET en formato PDF.\n\nConserva este documento para futuras consultas.\n\nAyúdanos a mejorar nuestro servicio contestando esta breve encuesta:\n${surveyUrl}`,
     html: `
       <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
         <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
@@ -111,7 +112,11 @@ const sendApprovalCertificate = async ({ to, clave, nombreComercial, pdf }) => {
             <p style="margin-top:0">Hola <strong>${safeName}</strong>:</p>
             <p>Tu registro <strong>${safeClave}</strong> fue revisado y aprobado.</p>
             <p>Encontrarás adjunta tu <strong>Cédula RET</strong>, que contiene el código QR y el sello digital de verificación.</p>
-            <p style="margin-bottom:0;font-size:13px;color:#617887">Conserva este documento para futuras consultas.</p>
+            <p style="font-size:13px;color:#617887">Conserva este documento para futuras consultas.</p>
+            <div style="margin-top:24px;padding:20px;border-radius:12px;background:#edf8fb;text-align:center">
+              <p style="margin:0 0 16px;color:#123d60">Ayúdanos a mejorar nuestro servicio contestando una breve encuesta.</p>
+              <a href="${surveyUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 22px;border-radius:8px;background:#0878b9;color:#fff;text-decoration:none;font-weight:bold">Contestar encuesta</a>
+            </div>
           </div>
         </div>
       </div>`,

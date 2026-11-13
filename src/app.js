@@ -150,6 +150,10 @@ app.get("/api/health", (req, res) => {
 
 const SESSION_COOKIE = "ret_session";
 const ADMIN_SESSION_COOKIE = "ret_admin_session";
+const USER_SESSION_MAX_AGE = 8 * 60 * 60 * 1000;
+const USER_REMEMBERED_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+const ADMIN_SESSION_MAX_AGE = 4 * 60 * 60 * 1000;
+const ADMIN_REMEMBERED_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const getJwtSecret = () => {
   const secret = process.env.JWT_SECRET;
   return typeof secret === "string" && secret.length >= 32 ? secret : null;
@@ -272,6 +276,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   }
   const clave = String(req.body.clave || "").trim().toUpperCase();
   const password = String(req.body.password || "");
+  const remember = req.body.remember === true || req.body.remember === 1 || req.body.remember === "1";
   const recaptchaToken = String(req.body.recaptcha_token || "").trim();
   const failedAttempts = Number(req.rateLimit?.used || 0);
   const captchaRequired = failedAttempts > 3;
@@ -328,9 +333,9 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
       await pool.execute("UPDATE ret_usr SET pass = ? WHERE id_usr = ?", [upgradedHash, user.id_usr]);
     }
 
-    const maxAge = 8 * 60 * 60 * 1000;
+    const maxAge = remember ? USER_REMEMBERED_MAX_AGE : USER_SESSION_MAX_AGE;
     const token = jwt.sign(
-      { sub: String(user.id_usr), clave: user.id, perfil: user.id_perfil },
+      { sub: String(user.id_usr), clave: user.id, perfil: user.id_perfil, remembered: remember },
       secret,
       { algorithm: "HS256", expiresIn: Math.floor(maxAge / 1000), issuer: "ret-api", audience: "ret-web", jwtid: crypto.randomUUID() },
     );
@@ -356,6 +361,7 @@ app.post("/api/admin/login", adminLoginLimiter, async (req, res, next) => {
   if (!secret) return res.status(503).json({ success: false, message: "La autenticación no está configurada" });
   const email = String(req.body.email || "").trim().toLowerCase();
   const password = String(req.body.password || "");
+  const remember = req.body.remember === true || req.body.remember === 1 || req.body.remember === "1";
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255 || !password || password.length > 128) {
     return res.status(401).json({ success: false, message: "Correo o contraseña incorrectos" });
   }
@@ -379,9 +385,9 @@ app.post("/api/admin/login", adminLoginLimiter, async (req, res, next) => {
       const upgradedHash = await bcrypt.hash(password, 12);
       await pool.execute("UPDATE `user` SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", [upgradedHash, admin.user_id]);
     }
-    const maxAge = 4 * 60 * 60 * 1000;
+    const maxAge = remember ? ADMIN_REMEMBERED_MAX_AGE : ADMIN_SESSION_MAX_AGE;
     const token = jwt.sign(
-      { sub: String(admin.user_id), role: "admin", email: admin.email, name: admin.name || "Administrador" },
+      { sub: String(admin.user_id), role: "admin", email: admin.email, name: admin.name || "Administrador", remembered: remember },
       secret,
       { algorithm: "HS256", expiresIn: Math.floor(maxAge / 1000), issuer: "ret-api", audience: "ret-admin", jwtid: crypto.randomUUID() },
     );
@@ -1014,9 +1020,10 @@ app.post("/api/mis-registros/:clave/seleccionar", requireAuth, async (req, res, 
     );
     if (!target) return res.status(404).json({ success: false, message: "El establecimiento no pertenece a tu cuenta" });
     const secret = getJwtSecret();
-    const maxAge = 8 * 60 * 60 * 1000;
+    const remembered = req.auth.remembered === true;
+    const maxAge = remembered ? USER_REMEMBERED_MAX_AGE : USER_SESSION_MAX_AGE;
     const token = jwt.sign(
-      { sub: String(target.id_usr), clave: target.clave, perfil: target.id_perfil },
+      { sub: String(target.id_usr), clave: target.clave, perfil: target.id_perfil, remembered },
       secret,
       { algorithm: "HS256", expiresIn: Math.floor(maxAge / 1000), issuer: "ret-api", audience: "ret-web", jwtid: crypto.randomUUID() },
     );
@@ -1072,6 +1079,62 @@ app.delete("/api/mis-registros/:clave", requireAuth, async (req, res, next) => {
 app.post("/api/auth/logout", requireAuth, (req, res) => {
   res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/" });
   res.status(200).json({ success: true });
+});
+
+const reverseGeocodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Realizaste demasiadas consultas de ubicación. Intenta nuevamente más tarde" },
+});
+
+app.get("/api/geocodificacion/reversa", requireAuth, reverseGeocodeLimiter, async (req, res, next) => {
+  try {
+    const latitud = Number(req.query.latitud);
+    const longitud = Number(req.query.longitud);
+    if (!Number.isFinite(latitud) || !Number.isFinite(longitud) || latitud < -90 || latitud > 90 || longitud < -180 || longitud > 180) {
+      return res.status(400).json({ success: false, message: "Las coordenadas no son válidas" });
+    }
+    const endpoint = new URL("https://nominatim.openstreetmap.org/reverse");
+    endpoint.search = new URLSearchParams({
+      format: "jsonv2",
+      addressdetails: "1",
+      zoom: "18",
+      lat: latitud.toFixed(7),
+      lon: longitud.toFixed(7),
+      "accept-language": "es",
+    }).toString();
+    const contact = String(process.env.GEOCODING_CONTACT_EMAIL || process.env.MAIL_USER || "").trim();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          "User-Agent": `RET-Guanajuato/1.0${contact ? ` (${contact})` : ""}`,
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) return res.status(502).json({ success: false, message: "El servicio de ubicación no respondió correctamente" });
+    const result = await response.json();
+    const address = result?.address || {};
+    const clean = (value, max = 120) => String(value || "").trim().slice(0, max);
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({ success: true, data: {
+      calle: clean(address.road || address.pedestrian || address.residential || address.footway || address.path),
+      numero: clean(address.house_number, 10),
+      colonia: clean(address.suburb || address.neighbourhood || address.quarter || address.residential || address.village, 50),
+      cp: clean(address.postcode, 10),
+    } });
+  } catch (error) {
+    if (error.name === "AbortError") return res.status(504).json({ success: false, message: "La consulta de ubicación tardó demasiado" });
+    next(error);
+  }
 });
 
 app.get("/api/form/datos-generales", requireAuth, async (req, res, next) => {
@@ -1715,7 +1778,6 @@ app.put("/api/form/restaurantes", requireAuth, async (req, res, next) => {
   const licencia = String(req.body.licencia || "").trim();
   const numLicencia = String(req.body.num_licencia || "").trim();
   const permiso = String(req.body.permiso || "").trim();
-  const tipoServicio = String(req.body.tipo_servicio ?? "").trim();
   const numBebidas = String(req.body.num_bebidas || "").trim();
   const numPotenciales = Number.parseInt(req.body.num_potenciales, 10);
   const numMesas = Number.parseInt(req.body.num_mesas, 10);
@@ -1725,7 +1787,6 @@ app.put("/api/form/restaurantes", requireAuth, async (req, res, next) => {
   if (!["Si", "No"].includes(licencia)) return res.status(400).json({ success: false, message: "Indica si cuentas con licencia" });
   if (licencia === "Si" && (!numLicencia || numLicencia.length > 40)) return res.status(400).json({ success: false, message: "Captura el número de licencia" });
   if (!["Si", "No"].includes(permiso)) return res.status(400).json({ success: false, message: "Indica si cuentas con permiso" });
-  if (!["0", "1", "2"].includes(tipoServicio)) return res.status(400).json({ success: false, message: "Selecciona un tipo de servicio válido" });
   if (permiso === "Si" && (!numBebidas || numBebidas.length > 40)) return res.status(400).json({ success: false, message: "Captura el número del permiso de bebidas" });
   if (![numPotenciales, numMesas].every((value) => Number.isInteger(value) && value >= 0 && value <= 32767)) return res.status(400).json({ success: false, message: "La capacidad o número de mesas no es válido" });
   if (!RESTAURANTE_TIPOS.includes(tipoEstablecimiento)) return res.status(400).json({ success: false, message: "Selecciona un tipo de establecimiento válido" });
@@ -1744,10 +1805,10 @@ app.put("/api/form/restaurantes", requireAuth, async (req, res, next) => {
     }
     const checkboxAssignments = RESTAURANTE_CHECKBOXES.map((field) => `\`${field}\` = ?`).join(", ");
     const [result] = await connection.execute(
-      `UPDATE ret_frm_restaurantes SET licencia = ?, num_licencia = ?, permiso = ?, tipo_servicio = ?, num_bebidas = ?,
+      `UPDATE ret_frm_restaurantes SET licencia = ?, num_licencia = ?, permiso = ?, num_bebidas = ?,
               ${checkboxAssignments}, num_potenciales = ?, num_mesas = ?, tipo_establecimiento = ?, tipo_cocina = ?, porcentaje_registro = 100
        WHERE clave = ?`,
-      [licencia, licencia === "Si" ? numLicencia : null, permiso, tipoServicio, permiso === "Si" ? numBebidas : null,
+      [licencia, licencia === "Si" ? numLicencia : null, permiso, permiso === "Si" ? numBebidas : null,
         ...checkboxes, numPotenciales, numMesas, tipoEstablecimiento, tipoCocina, req.auth.clave],
     );
     if (!result.affectedRows) {
@@ -2575,7 +2636,7 @@ const generatePassword = () => {
 };
 
 app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, res, next) => {
-  const rfc = String(req.body.rfc || "").trim().toUpperCase();
+  let rfc = String(req.body.rfc || "").trim().toUpperCase();
   const giro = Number.parseInt(req.body.giro, 10);
   const municipio = Number.parseInt(req.body.municipio, 10);
   const nombreComercial = String(req.body.nombre_completo || req.body.nombre_comercial || "").trim();
@@ -2584,7 +2645,7 @@ app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, r
   const correoConfirmacion = String(req.body.correo_confirmacion || req.body.email_confirmation || "").trim().toLowerCase();
   const privacidad = req.body.privacidad === true || req.body.privacidad === 1 || req.body.privacidad === "1";
 
-  if (!/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/.test(rfc)) {
+  if (!req.auth && !/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/.test(rfc)) {
     return res.status(400).json({ success: false, message: "El RFC no tiene un formato válido" });
   }
   if (!GIRO_TABLES[giro] || !Number.isInteger(municipio) || municipio < 1) {
@@ -2612,7 +2673,10 @@ app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, r
     let inheritedProfile = 3;
     if (req.auth) {
       const [[owner]] = await connection.execute(
-        "SELECT email, pass, id_perfil FROM ret_usr WHERE id_usr = ? AND id = ? AND activo = 1 LIMIT 1 FOR UPDATE",
+        `SELECT u.email, u.pass, u.id_perfil, d.info_rfc
+         FROM ret_usr u
+         JOIN ret_datos_generales d ON d.clave = u.id
+         WHERE u.id_usr = ? AND u.id = ? AND u.activo = 1 LIMIT 1 FOR UPDATE`,
         [req.auth.sub, req.auth.clave],
       );
       if (!owner) {
@@ -2620,11 +2684,16 @@ app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, r
         return res.status(401).json({ success: false, message: "La sesión ya no es válida" });
       }
       correo = String(owner.email || "").trim().toLowerCase();
+      rfc = String(owner.info_rfc || "").trim().toUpperCase();
       inheritedPasswordHash = owner.pass;
       inheritedProfile = owner.id_perfil;
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo) || correo.length > 150 || !inheritedPasswordHash) {
         await connection.rollback();
         return res.status(400).json({ success: false, message: "La cuenta actual no tiene un correo o acceso válido" });
+      }
+      if (!/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/.test(rfc)) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: "El registro actual no tiene un RFC válido para crear otro establecimiento" });
       }
     }
 
