@@ -64,14 +64,22 @@ const sendStoredObject = async (res, storedPath, filename, inline = false) => {
 };
 const legalUpload = multer({
   dest: temporaryUploads,
-  limits: { fileSize: 20 * 1024 * 1024, files: 9 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 11 },
   fileFilter: (req, file, callback) => callback(null, ["application/pdf", "image/png", "image/jpeg"].includes(file.mimetype)),
 });
 const LEGAL_FIELDS = Object.freeze({
   rfc: "rfc", curp: "curp", ife: "ife", licencia_suelo: "licencia_suelo",
   escritura_publica: "escritura_publica", acta_constitutiva: "acta_constitutiva",
   rfc_legal: "rfc_legal", domicilio: "domicilio", protocolo_higiene: "protocolo_higiene",
+  credencial_guia: "credencial_guia", carta_protesta: "carta_protesta",
 });
+const requiredLegalFields = (giro, tipoPersona) => {
+  if (Number(giro) === 3) return ["rfc", "ife", "curp", "credencial_guia", "domicilio"];
+  const fields = ["rfc", "ife", "escritura_publica", "curp", "licencia_suelo", "domicilio"];
+  if (Number(tipoPersona) === 2) fields.push("rfc_legal", "acta_constitutiva");
+  if (Number(giro) === 17) fields.push("protocolo_higiene", "carta_protesta");
+  return fields;
+};
 const GRAPHIC_FIELDS = Object.freeze({
   imagen_promocional: "imagen_promocional", logo: "logo", imagen1: "imagen1",
   imagen2: "imagen2", imagen3: "imagen3",
@@ -551,6 +559,8 @@ const ADMIN_DOCUMENT_FIELDS = Object.freeze({
   rfc_legal: "RFC del representante legal",
   domicilio: "Comprobante de Domicilio",
   protocolo_higiene: "Protocolo de Higiene",
+  credencial_guia: "Credencial de guía vigente",
+  carta_protesta: "Carta protesta",
   imagen_promocional: "Imagen Promocional",
   logo: "Logotipo",
   imagen1: "Fotografía exterior",
@@ -1289,6 +1299,7 @@ app.get("/api/form/datos-legales", requireAuth, async (req, res, next) => {
     const [[row]] = await pool.execute(
       `SELECT a.rfc, a.curp, a.ife, a.licencia_suelo, a.escritura_publica,
               a.acta_constitutiva, a.rfc_legal, a.domicilio, a.protocolo_higiene,
+              a.credencial_guia, a.carta_protesta,
               d.tipo_persona, d.giro
        FROM ret_archivo_legal a JOIN ret_datos_generales d ON d.clave = a.clave
        WHERE a.clave = ? LIMIT 1`,
@@ -1335,6 +1346,7 @@ app.post("/api/form/datos-legales", requireAuth, legalUpload.fields(Object.keys(
     const [[current]] = await pool.execute(
       `SELECT a.rfc, a.curp, a.ife, a.licencia_suelo, a.escritura_publica,
               a.acta_constitutiva, a.rfc_legal, a.domicilio, a.protocolo_higiene,
+              a.credencial_guia, a.carta_protesta,
               d.tipo_persona, d.giro
        FROM ret_archivo_legal a JOIN ret_datos_generales d ON d.clave = a.clave
        WHERE a.clave = ? LIMIT 1`,
@@ -1345,9 +1357,7 @@ app.post("/api/form/datos-legales", requireAuth, legalUpload.fields(Object.keys(
       return res.status(404).json({ success: false, message: "No se encontró el expediente legal" });
     }
     const incoming = (field) => Boolean(req.files?.[field]?.[0]);
-    const required = ["rfc", "ife", "licencia_suelo", "escritura_publica", "domicilio"];
-    if (Number(current.tipo_persona) === 2) required.push("acta_constitutiva", "rfc_legal");
-    if (Number(current.giro) === 17) required.push("protocolo_higiene");
+    const required = requiredLegalFields(current.giro, current.tipo_persona);
     const missing = required.filter((field) => !current[field] && !incoming(field));
     if (missing.length) {
       await cleanTemporaryFiles();
