@@ -611,6 +611,23 @@ app.get("/api/admin/tramites/:clave/documentos/:field", requireAdminDocument, as
   } catch (error) { next(error); }
 });
 
+app.post("/api/admin/tramites/:clave/validar-documentos-recuperados", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
+  try {
+    const [result] = await pool.execute(
+      "UPDATE ret_datos_generales SET s3 = 0 WHERE clave = ? AND s3 = 1",
+      [clave],
+    );
+    if (!result.affectedRows) {
+      const [[record]] = await pool.execute("SELECT clave FROM ret_datos_generales WHERE clave = ? LIMIT 1", [clave]);
+      if (!record) return res.status(404).json({ success: false, message: "No se encontró el expediente" });
+      return res.status(409).json({ success: false, message: "Este expediente ya no está marcado para recuperación documental" });
+    }
+    res.status(200).json({ success: true, message: "Los documentos recuperados fueron validados correctamente" });
+  } catch (error) { next(error); }
+});
+
 app.post("/api/admin/tramites/:clave/observaciones", requireAdmin, async (req, res, next) => {
   const clave = String(req.params.clave || "").trim().toUpperCase();
   const observations = String(req.body.observaciones || "").trim();
@@ -793,7 +810,7 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const offset = (page - 1) * pageSize;
     const [[countRows], [rows]] = await Promise.all([
       pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
-      pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro,
+      pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro, d.s3,
         g.giro, m.municipio, ${statusCase("d")} AS estatus
         ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
     ]);
