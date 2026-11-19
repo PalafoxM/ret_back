@@ -2657,9 +2657,33 @@ app.put("/api/form/hospedaje-digital", requireAuth, requireEditableUser, async (
   } finally { if (connection) connection.release(); }
 });
 
+const publicDirectoryCondition = (alias = "d") => `(
+  COALESCE(${alias}.visible, 0) = 1
+  AND COALESCE(${alias}.aprobado, 0) = 1
+  AND COALESCE(${alias}.renovar, 0) = 0
+  AND COALESCE(
+    (SELECT MAX(u.fecha_renovacion) FROM ret_usr u WHERE u.id = ${alias}.clave),
+    ${alias}.fecha_registro
+  ) IS NOT NULL
+  AND DATEDIFF(CURRENT_DATE(), DATE(COALESCE(
+    (SELECT MAX(u.fecha_renovacion) FROM ret_usr u WHERE u.id = ${alias}.clave),
+    ${alias}.fecha_registro
+  ))) <= 1095
+)`;
+
 app.get("/api/giros", async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT id_giro, giro, resumen FROM ret_giro WHERE estatus = 1 ORDER BY id_giro");
+    const directoryOnly = String(req.query.directorio || "") === "1";
+    const [rows] = await pool.query(directoryOnly
+      ? `SELECT g.id_giro, g.giro, g.resumen
+         FROM ret_giro g
+         WHERE g.estatus = 1
+           AND EXISTS (
+             SELECT 1 FROM ret_datos_generales d
+             WHERE d.giro = g.id_giro AND ${publicDirectoryCondition("d")}
+           )
+         ORDER BY g.id_giro`
+      : "SELECT id_giro, giro, resumen FROM ret_giro WHERE estatus = 1 ORDER BY id_giro");
     res.status(200).json({
       success: true,
       data: rows.map((row) => ({
@@ -2942,7 +2966,7 @@ app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
     if (!Number.isInteger(municipio) || municipio < 0) {
       return res.status(400).json({ success: false, message: "El municipio no es válido" });
     }
-    const conditions = ["d.visible = 1", "d.giro = ?"];
+    const conditions = [publicDirectoryCondition("d"), "d.giro = ?"];
     const parameters = [giro];
     if (municipio > 0) {
       conditions.push("d.municipio = ?");
@@ -2997,7 +3021,7 @@ app.get("/api/directorio/establecimientos", publicMapLimiter, async (req, res, n
       return res.status(400).json({ success: false, message: "Selecciona un giro o un municipio" });
     }
 
-    const conditions = ["d.visible = 1"];
+    const conditions = [publicDirectoryCondition("d")];
     const parameters = [];
     if (giro > 0) {
       conditions.push("d.giro = ?");
