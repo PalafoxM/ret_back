@@ -2985,16 +2985,28 @@ app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
 
 app.get("/api/directorio/establecimientos", publicMapLimiter, async (req, res, next) => {
   try {
-    const giro = Number.parseInt(req.query.giro, 10);
+    const giro = req.query.giro ? Number.parseInt(req.query.giro, 10) : 0;
+    const municipio = req.query.municipio ? Number.parseInt(req.query.municipio, 10) : 0;
     const busqueda = String(req.query.busqueda || "").trim().slice(0, 100);
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(24, Math.max(6, Number.parseInt(req.query.pageSize, 10) || 12));
-    if (!Number.isInteger(giro) || giro < 1) {
-      return res.status(400).json({ success: false, message: "Selecciona un giro válido" });
+    if (!Number.isInteger(giro) || giro < 0 || !Number.isInteger(municipio) || municipio < 0) {
+      return res.status(400).json({ success: false, message: "Los filtros seleccionados no son válidos" });
+    }
+    if (giro === 0 && municipio === 0) {
+      return res.status(400).json({ success: false, message: "Selecciona un giro o un municipio" });
     }
 
-    const conditions = ["d.visible = 1", "d.giro = ?"];
-    const parameters = [giro];
+    const conditions = ["d.visible = 1"];
+    const parameters = [];
+    if (giro > 0) {
+      conditions.push("d.giro = ?");
+      parameters.push(giro);
+    }
+    if (municipio > 0) {
+      conditions.push("d.municipio = ?");
+      parameters.push(municipio);
+    }
     if (busqueda) {
       const pattern = `%${busqueda}%`;
       conditions.push(`(d.nombre_comercial LIKE ? OR d.descripcion LIKE ? OR m.municipio LIKE ?
