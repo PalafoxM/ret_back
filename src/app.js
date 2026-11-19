@@ -2907,6 +2907,74 @@ app.get("/api/establecimientos", publicMapLimiter, async (req, res, next) => {
   }
 });
 
+app.get("/api/directorio/establecimientos", publicMapLimiter, async (req, res, next) => {
+  try {
+    const giro = Number.parseInt(req.query.giro, 10);
+    const busqueda = String(req.query.busqueda || "").trim().slice(0, 100);
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(24, Math.max(6, Number.parseInt(req.query.pageSize, 10) || 12));
+    if (!Number.isInteger(giro) || giro < 1) {
+      return res.status(400).json({ success: false, message: "Selecciona un giro válido" });
+    }
+
+    const conditions = ["d.visible = 1", "d.giro = ?"];
+    const parameters = [giro];
+    if (busqueda) {
+      const pattern = `%${busqueda}%`;
+      conditions.push(`(d.nombre_comercial LIKE ? OR d.descripcion LIKE ? OR m.municipio LIKE ?
+        OR d.colonia LIKE ? OR s.descripcion LIKE ?)`);
+      parameters.push(pattern, pattern, pattern, pattern, pattern);
+    }
+    const fromSql = `FROM ret_datos_generales d
+      LEFT JOIN ret_giro g ON g.id_giro = d.giro
+      LEFT JOIN ret_municipio m ON m.id_municipio = d.municipio
+      LEFT JOIN ret_giro_subrubro s ON s.idgiro_subrubro = d.idgiro_subrubro AND s.id_giro = d.giro
+      WHERE ${conditions.join(" AND ")}`;
+    const offset = (page - 1) * pageSize;
+    const [[countRows], [rows]] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, parameters),
+      pool.execute(
+        `SELECT d.clave, d.nombre_comercial, d.giro, g.giro AS giro_nombre,
+          d.idgiro_subrubro, s.descripcion AS subrubro, m.municipio, d.colonia,
+          d.latitud, d.longitud, d.descripcion,
+          NULLIF(TRIM(d.telefono_comercial), '') AS telefono_comercial,
+          NULLIF(TRIM(d.telefono2), '') AS telefono2,
+          COALESCE(NULLIF(TRIM(d.correo_atncli), ''), NULLIF(TRIM(d.correo), '')) AS correo,
+          NULLIF(TRIM(d.web), '') AS web,
+          NULLIF(TRIM(CONCAT_WS(', ',
+            NULLIF(TRIM(CONCAT_WS(' ', NULLIF(d.calle, ''), NULLIF(d.numero, ''))), ''),
+            NULLIF(d.colonia, ''), NULLIF(m.municipio, ''),
+            IF(NULLIF(d.cp, '') IS NULL, NULL, CONCAT('C.P. ', d.cp))
+          )), '') AS direccion
+         ${fromSql}
+         ORDER BY d.nombre_comercial ASC, d.id_pts ASC
+         LIMIT ${pageSize} OFFSET ${offset}`,
+        parameters,
+      ),
+    ]);
+    const data = rows.map((row) => {
+      const latitud = Number(row.latitud);
+      const rawLongitud = Number(row.longitud);
+      const longitud = rawLongitud > 0 ? -rawLongitud : rawLongitud;
+      const hasCoordinates = Number.isFinite(latitud) && Number.isFinite(longitud) &&
+        latitud >= 14 && latitud <= 33 && longitud >= -119 && longitud <= -86;
+      return {
+        ...row,
+        giro_nombre: decodeLegacyHtmlEntities(row.giro_nombre),
+        subrubro: decodeLegacyHtmlEntities(row.subrubro),
+        latitud: hasCoordinates ? latitud : null,
+        longitud: hasCoordinates ? longitud : null,
+        tiene_ubicacion: hasCoordinates,
+      };
+    });
+    const total = Number(countRows[0]?.total || 0);
+    res.status(200).json({
+      success: true,
+      data: { rows: data, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) },
+    });
+  } catch (error) { next(error); }
+});
+
 app.use((error, req, res, next) => {
   console.error(error);
   if (error instanceof multer.MulterError) {
