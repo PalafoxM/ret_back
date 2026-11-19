@@ -183,6 +183,25 @@ const requireAuth = (req, res, next) => {
   }
 };
 
+const requireEditableUser = async (req, res, next) => {
+  try {
+    const [[record]] = await pool.execute(
+      `SELECT u.id_usr, COALESCE(u.edicion, 0) AS edicion, COALESCE(d.aprobado, 0) AS aprobado
+       FROM ret_usr u
+       JOIN ret_datos_generales d ON d.clave = u.id
+       WHERE u.id_usr = ? AND u.id = ? AND u.activo = 1
+       LIMIT 1`,
+      [req.auth.sub, req.auth.clave],
+    );
+    if (!record) return res.status(401).json({ success: false, message: "La sesión ya no es válida" });
+    if (Number(record.aprobado) === 1 && Number(record.edicion) !== 1) {
+      return res.status(403).json({ success: false, message: "La edición de este registro requiere autorización administrativa" });
+    }
+    req.editPermission = { enabled: Number(record.edicion) === 1, approved: Number(record.aprobado) === 1 };
+    next();
+  } catch (error) { next(error); }
+};
+
 const requireAdmin = (req, res, next) => {
   const secret = getJwtSecret();
   if (!secret) return res.status(503).json({ success: false, message: "La autenticación no está configurada" });
@@ -314,8 +333,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
       }
     }
     const [[user]] = await pool.execute(
-      `SELECT u.id_usr, u.id, u.pass, u.email, u.id_perfil, u.activo,
-              d.nombre_comercial, d.giro, d.porcentaje_registro
+      `SELECT u.id_usr, u.id, u.pass, u.email, u.id_perfil, u.activo, COALESCE(u.edicion, 0) AS edicion,
+              d.nombre_comercial, d.giro, d.porcentaje_registro, COALESCE(d.aprobado, 0) AS aprobado
        FROM ret_usr u
        LEFT JOIN ret_datos_generales d ON d.clave = u.id
        WHERE u.id = ? LIMIT 1`,
@@ -357,6 +376,8 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
     res.status(200).json({ success: true, data: {
       clave: user.id, email: user.email, nombre_comercial: user.nombre_comercial,
       giro: user.giro, porcentaje_registro: user.porcentaje_registro,
+      edicion: Number(user.edicion), aprobado: Number(user.aprobado),
+      puede_editar: Number(user.aprobado) !== 1 || Number(user.edicion) === 1,
       session_expires_at: Date.now() + maxAge,
     } });
   } catch (error) {
@@ -811,12 +832,59 @@ app.get("/api/admin/tramites", requireAdmin, async (req, res, next) => {
     const [[countRows], [rows]] = await Promise.all([
       pool.execute(`SELECT COUNT(*) AS total ${fromSql}`, params),
       pool.execute(`SELECT d.clave, d.nombre_comercial, d.correo, d.fecha_registro, d.s3,
+        (SELECT u.id_usr FROM ret_usr u WHERE u.id = d.clave AND u.activo = 1 ORDER BY u.id_usr DESC LIMIT 1) AS id_usuario,
+        COALESCE((SELECT u.edicion FROM ret_usr u WHERE u.id = d.clave AND u.activo = 1 ORDER BY u.id_usr DESC LIMIT 1), 0) AS edicion,
         g.giro, m.municipio, ${statusCase("d")} AS estatus
         ${fromSql} ORDER BY d.fecha_registro DESC, d.id_pts DESC LIMIT ${pageSize} OFFSET ${offset}`, params),
     ]);
     const total = Number(countRows[0]?.total || 0);
     res.status(200).json({ success: true, data: { rows, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) } });
   } catch (error) { next(error); }
+});
+
+app.post("/api/admin/tramites/:clave/activar-edicion", requireAdmin, async (req, res, next) => {
+  const clave = String(req.params.clave || "").trim().toUpperCase();
+  if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[user]] = await connection.execute(
+      `SELECT u.id_usr, COALESCE(u.edicion, 0) AS edicion
+       FROM ret_usr u
+       JOIN ret_datos_generales d ON d.clave = u.id
+       WHERE u.id = ? AND u.activo = 1
+       ORDER BY u.id_usr DESC
+       LIMIT 1 FOR UPDATE`,
+      [clave],
+    );
+    if (!user) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: "El trámite no tiene un usuario RET activo asociado" });
+    }
+    if (Number(user.edicion) === 1) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "La edición ya se encuentra habilitada para este usuario RET" });
+    }
+    const [result] = await connection.execute(
+      `UPDATE ret_usr SET edicion = 1
+       WHERE id_usr = ? AND id = ? AND activo = 1 AND COALESCE(edicion, 0) = 0`,
+      [user.id_usr, clave],
+    );
+    if (!result.affectedRows) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: "No fue posible activar la edición del usuario seleccionado" });
+    }
+    await connection.commit();
+    res.status(200).json({
+      success: true,
+      message: "Edición habilitada correctamente. El usuario RET ya puede modificar su información.",
+      data: { clave, id_usuario: user.id_usr, edicion: 1 },
+    });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    next(error);
+  } finally { if (connection) connection.release(); }
 });
 
 app.post("/api/admin/tramites/:clave/activar-renovacion", requireAdmin, async (req, res, next) => {
@@ -991,14 +1059,19 @@ app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
 app.get("/api/auth/me", requireAuth, async (req, res, next) => {
   try {
     const [[user]] = await pool.execute(
-      `SELECT u.id AS clave, u.email, u.id_perfil, u.activo,
-              d.nombre_comercial, d.giro, d.municipio, d.porcentaje_registro
+      `SELECT u.id AS clave, u.email, u.id_perfil, u.activo, COALESCE(u.edicion, 0) AS edicion,
+              d.nombre_comercial, d.giro, d.municipio, d.porcentaje_registro, COALESCE(d.aprobado, 0) AS aprobado
        FROM ret_usr u LEFT JOIN ret_datos_generales d ON d.clave = u.id
        WHERE u.id_usr = ? AND u.id = ? LIMIT 1`,
       [req.auth.sub, req.auth.clave],
     );
     if (!user || Number(user.activo) !== 1) return res.status(401).json({ success: false, message: "Sesión no válida" });
-    res.status(200).json({ success: true, data: { ...user, session_expires_at: Number(req.auth.exp) * 1000 } });
+    res.status(200).json({ success: true, data: {
+      ...user,
+      edicion: Number(user.edicion), aprobado: Number(user.aprobado),
+      puede_editar: Number(user.aprobado) !== 1 || Number(user.edicion) === 1,
+      session_expires_at: Number(req.auth.exp) * 1000,
+    } });
   } catch (error) {
     next(error);
   }
@@ -1013,6 +1086,7 @@ app.get("/api/mis-registros", requireAuth, async (req, res, next) => {
     if (!owner) return res.status(401).json({ success: false, message: "La sesión ya no es válida" });
     const [rows] = await pool.execute(
       `SELECT u.id AS clave, d.nombre_comercial, d.info_rfc AS rfc, d.porcentaje_registro, d.giro AS id_giro,
+              COALESCE(u.edicion, 0) AS edicion, COALESCE(d.aprobado, 0) AS aprobado,
               g.resumen AS giro, m.municipio
        FROM ret_usr u
        JOIN ret_datos_generales d ON d.clave = u.id
@@ -1036,8 +1110,8 @@ app.post("/api/mis-registros/:clave/seleccionar", requireAuth, async (req, res, 
   if (!/^RET\d{6,14}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
   try {
     const [[target]] = await pool.execute(
-      `SELECT target.id_usr, target.id AS clave, target.id_perfil, target.email,
-              d.nombre_comercial, d.giro, d.municipio, d.porcentaje_registro
+      `SELECT target.id_usr, target.id AS clave, target.id_perfil, target.email, COALESCE(target.edicion, 0) AS edicion,
+              d.nombre_comercial, d.giro, d.municipio, d.porcentaje_registro, COALESCE(d.aprobado, 0) AS aprobado
        FROM ret_usr current_account
        JOIN ret_usr target ON LOWER(target.email) = LOWER(current_account.email) AND target.id = ? AND target.activo = 1
        JOIN ret_datos_generales d ON d.clave = target.id
@@ -1064,6 +1138,8 @@ app.post("/api/mis-registros/:clave/seleccionar", requireAuth, async (req, res, 
       giro: target.giro,
       municipio: target.municipio,
       porcentaje_registro: target.porcentaje_registro,
+      edicion: Number(target.edicion), aprobado: Number(target.aprobado),
+      puede_editar: Number(target.aprobado) !== 1 || Number(target.edicion) === 1,
       session_expires_at: Date.now() + maxAge,
     } });
   } catch (error) {
@@ -1191,7 +1267,7 @@ app.get("/api/form/datos-generales", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/datos-generales", requireAuth, async (req, res, next) => {
+app.put("/api/form/datos-generales", requireAuth, requireEditableUser, async (req, res, next) => {
   const text = (name, max) => String(req.body[name] ?? "").trim().slice(0, max);
   const required = ["contacto", "razon_social", "calle", "numero", "colonia", "cp", "telefono", "telefono_comercial", "correo_atncli", "descripcion"];
   if (required.some((field) => !text(field, 300))) {
@@ -1267,7 +1343,7 @@ app.get("/api/form/datos-tecnicos", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/datos-tecnicos", requireAuth, async (req, res, next) => {
+app.put("/api/form/datos-tecnicos", requireAuth, requireEditableUser, async (req, res, next) => {
   const count = (name) => Number.parseInt(req.body[name], 10);
   const counts = ["fijos_h", "fijos_m", "tempo_h", "tempo_m", "disca_h", "disca_m"];
   if (counts.some((name) => !Number.isInteger(count(name)) || count(name) < 0 || count(name) > 9999)) {
@@ -1342,7 +1418,7 @@ app.get("/api/form/datos-legales/archivo/:field", requireAuth, async (req, res, 
   }
 });
 
-app.post("/api/form/datos-legales", requireAuth, legalUpload.fields(Object.keys(LEGAL_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
+app.post("/api/form/datos-legales", requireAuth, requireEditableUser, legalUpload.fields(Object.keys(LEGAL_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
   const uploadedFiles = Object.values(req.files || {}).flat();
   const uploadedS3Keys = [];
   const cleanTemporaryFiles = async () => Promise.all(uploadedFiles.map((file) => fsp.unlink(file.path).catch(() => {})));
@@ -1434,7 +1510,7 @@ app.get("/api/form/datos-graficos/archivo/:field", requireAuth, async (req, res,
   }
 });
 
-app.post("/api/form/datos-graficos", requireAuth, graphicUpload.fields(Object.keys(GRAPHIC_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
+app.post("/api/form/datos-graficos", requireAuth, requireEditableUser, graphicUpload.fields(Object.keys(GRAPHIC_FIELDS).map((name) => ({ name, maxCount: 1 }))), async (req, res, next) => {
   const uploadedFiles = Object.values(req.files || {}).flat();
   const uploadedS3Keys = [];
   const cleanTemporaryFiles = async () => Promise.all(uploadedFiles.map((file) => fsp.unlink(file.path).catch(() => {})));
@@ -1520,7 +1596,7 @@ app.get("/api/form/hospedaje", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/hospedaje", requireAuth, async (req, res, next) => {
+app.put("/api/form/hospedaje", requireAuth, requireEditableUser, async (req, res, next) => {
   const establecimiento = String(req.body.establecimiento || "").trim();
   const tipo = String(req.body.tipo || "").trim();
   const tipo2 = String(req.body.tipo2 || "").trim();
@@ -1592,7 +1668,7 @@ app.get("/api/form/agencia", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/agencia", requireAuth, async (req, res, next) => {
+app.put("/api/form/agencia", requireAuth, requireEditableUser, async (req, res, next) => {
   const modalidad = String(req.body.modalidad || "").trim();
   const segmento = String(req.body.segmento || "").trim();
   const asociacion = Number.parseInt(req.body.asociacion, 10);
@@ -1666,7 +1742,7 @@ app.get("/api/form/guia", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/guia", requireAuth, async (req, res, next) => {
+app.put("/api/form/guia", requireAuth, requireEditableUser, async (req, res, next) => {
   const guia = String(req.body.guia || "").trim();
   const numCredencial = String(req.body.num_credencial || "").trim();
   const nombreAsociacion = String(req.body.nombre_asociacion || "").trim();
@@ -1732,7 +1808,7 @@ app.get("/api/form/promotores", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/promotores", requireAuth, async (req, res, next) => {
+app.put("/api/form/promotores", requireAuth, requireEditableUser, async (req, res, next) => {
   const licencia = Number.parseInt(req.body.licencia, 10);
   const zona = String(req.body.zona || "").trim();
   const convenio = Number.parseInt(req.body.convenio, 10);
@@ -1801,7 +1877,7 @@ app.get("/api/form/restaurantes", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/restaurantes", requireAuth, async (req, res, next) => {
+app.put("/api/form/restaurantes", requireAuth, requireEditableUser, async (req, res, next) => {
   const licencia = String(req.body.licencia || "").trim();
   const numLicencia = String(req.body.num_licencia || "").trim();
   const permiso = String(req.body.permiso || "").trim();
@@ -1882,7 +1958,7 @@ app.get("/api/form/golf", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/golf", requireAuth, async (req, res, next) => {
+app.put("/api/form/golf", requireAuth, requireEditableUser, async (req, res, next) => {
   const turistico = String(req.body.turistico || "").trim();
   const carrito = String(req.body.carrito || "").trim();
   const privado = String(req.body.privado || "").trim();
@@ -1949,7 +2025,7 @@ app.get("/api/form/arte", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/arte", requireAuth, async (req, res, next) => {
+app.put("/api/form/arte", requireAuth, requireEditableUser, async (req, res, next) => {
   const tipos = ARTE_TIPOS.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const descripcion = String(req.body.descripcion || "").trim();
   const operacion = String(req.body.operacion || "").trim();
@@ -2011,7 +2087,7 @@ app.get("/api/form/arrendadora", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/arrendadora", requireAuth, async (req, res, next) => {
+app.put("/api/form/arrendadora", requireAuth, requireEditableUser, async (req, res, next) => {
   const noVehiculos = String(req.body.novehiculos || "").trim();
   const tipoVehiculos = String(req.body.tipovehiculos || "").trim();
   const capaVehiculos = String(req.body.capavehiculos || "").trim();
@@ -2080,7 +2156,7 @@ app.get("/api/form/parques", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/parques", requireAuth, async (req, res, next) => {
+app.put("/api/form/parques", requireAuth, requireEditableUser, async (req, res, next) => {
   const capacidad = String(req.body.capacidad || "").trim();
   const otraTc = String(req.body.otra_tc || "").trim();
   const checkboxes = PARQUES_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
@@ -2136,7 +2212,7 @@ app.get("/api/form/auxturistico", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/auxturistico", requireAuth, async (req, res, next) => {
+app.put("/api/form/auxturistico", requireAuth, requireEditableUser, async (req, res, next) => {
   const turnos = AUX_TURISTICO_TURNOS.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const horario = String(req.body.horario || "").trim();
   if (!turnos.some(Boolean)) return res.status(400).json({ success: false, message: "Selecciona al menos un turno de operación" });
@@ -2196,7 +2272,7 @@ app.get("/api/form/balnearios", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/balnearios", requireAuth, async (req, res, next) => {
+app.put("/api/form/balnearios", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = BALNEARIOS_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const shortNumber = (field) => String(req.body[field] ?? "").trim();
   const capacidad = shortNumber("capacidad");
@@ -2275,7 +2351,7 @@ app.get("/api/form/capacitacion", requireAuth, async (req, res, next) => {
   }
 });
 
-app.put("/api/form/capacitacion", requireAuth, async (req, res, next) => {
+app.put("/api/form/capacitacion", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = CAPACITACION_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const horario = String(req.body.horario || "").trim();
   const asociaciones = String(req.body.asociaciones || "").trim();
@@ -2344,7 +2420,7 @@ app.get("/api/form/deporte", requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put("/api/form/deporte", requireAuth, async (req, res, next) => {
+app.put("/api/form/deporte", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = DEPORTE_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const detalle = String(req.body.detalle || "").trim();
   const superficie = String(req.body.superficie || "").trim();
@@ -2409,7 +2485,7 @@ app.get("/api/form/spa", requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put("/api/form/spa", requireAuth, async (req, res, next) => {
+app.put("/api/form/spa", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = SPA_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const horario = String(req.body.horario || "").trim();
   const servOtro = String(req.body.serv_otro || "").trim();
@@ -2467,7 +2543,7 @@ app.get("/api/form/recinto", requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put("/api/form/recinto", requireAuth, async (req, res, next) => {
+app.put("/api/form/recinto", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = RECINTO_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const horario = String(req.body.horario || "").trim();
   const modalidad = String(req.body.modalidad || "").trim();
@@ -2528,7 +2604,7 @@ app.get("/api/form/hospedaje-digital", requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.put("/api/form/hospedaje-digital", requireAuth, async (req, res, next) => {
+app.put("/api/form/hospedaje-digital", requireAuth, requireEditableUser, async (req, res, next) => {
   const checkboxValues = DIGITAL_CHECKBOXES.map((field) => Number(req.body[field]) === 1 ? 1 : 0);
   const categoria = Number.parseInt(req.body.categoria, 10);
   const establecimiento = String(req.body.establecimiento || "").trim();
@@ -2810,7 +2886,7 @@ app.post("/api/registro", registrationLimiter, attachOptionalAuth, async (req, r
   }
 });
 
-app.post("/api/form/encuesta", requireAuth, async (req, res, next) => {
+app.post("/api/form/encuesta", requireAuth, requireEditableUser, async (req, res, next) => {
   const fueUtilidad = Number.parseInt(req.body.fue_utilidad, 10);
   const facilNavegacion = Number.parseInt(req.body.facil_navegacion, 10);
   const gustaria = String(req.body.gustaria || "").trim();
