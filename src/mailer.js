@@ -68,7 +68,7 @@ const sendPasswordRecovery = async ({ to, clave, temporaryPassword, nombreComerc
     from: process.env.MAIL_FROM || process.env.MAIL_USER,
     to,
     subject: "Recuperación de acceso al Registro Estatal de Turismo",
-    text: `Hola ${nombreComercial || "usuario RET"},\n\nRecibimos una solicitud para recuperar tu acceso.\n\nClave RET: ${clave}\nNueva contraseña temporal: ${temporaryPassword}\n\nSi no realizaste esta solicitud, contacta al soporte del RET.`,
+    text: `Hola ${nombreComercial || "usuario RET"},\n\nRecibimos una solicitud para recuperar tu acceso.\n\nClave RET: ${clave}\nNueva contraseña: ${temporaryPassword}\n\nSi no realizaste esta solicitud, contacta al soporte del RET.`,
     html: `
       <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
         <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
@@ -78,11 +78,11 @@ const sendPasswordRecovery = async ({ to, clave, temporaryPassword, nombreComerc
           </div>
           <div style="padding:30px">
             <p style="margin-top:0">Hola <strong>${safeName}</strong>:</p>
-            <p>Recibimos una solicitud para recuperar el acceso a tu cuenta. Tu nueva contraseña temporal es:</p>
+            <p>Recibimos una solicitud para recuperar el acceso a tu cuenta. Tu nueva contraseña es:</p>
             <div style="margin:24px 0;padding:18px;border:1px solid #b9dce5;border-radius:12px;background:#edf8fb">
               <div style="margin-bottom:8px;font-size:12px;color:#617887">CLAVE RET</div>
               <strong style="display:block;margin-bottom:18px;font-size:19px;color:#0b4a86">${safeClave}</strong>
-              <div style="margin-bottom:8px;font-size:12px;color:#617887">NUEVA CONTRASEÑA TEMPORAL</div>
+              <div style="margin-bottom:8px;font-size:12px;color:#617887">NUEVA CONTRASEÑA</div>
               <strong style="display:block;font-size:20px;color:#0b4a86">${safePassword}</strong>
             </div>
             <p style="font-size:13px;color:#617887">Si no realizaste esta solicitud, contacta al soporte del RET.</p>
