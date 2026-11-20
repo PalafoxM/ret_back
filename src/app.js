@@ -17,7 +17,7 @@ const { createApprovalSeal, generateCedulaRet } = require("./cedula");
 const { S3_PREFIX, validKey: isS3Key, putObject: putS3Object, getObject: getS3Object, deleteObject: deleteS3Object } = require("./s3");
 const { STATE_REPORTS, APP_REPORTS, queryReport, buildWorkbook } = require("./reports");
 const { assessLogin } = require("./recaptcha");
-const { renewalCondition, concludedCondition, pendingCondition, statusCase } = require("./status");
+const { validityBaseDate, renewalCondition, concludedCondition, pendingCondition, statusCase } = require("./status");
 
 const decodeLegacyHtmlEntities = (value) => {
   if (typeof value !== "string") return value;
@@ -443,7 +443,8 @@ const getCedulaRecord = async (executor, clave, lock = false) => {
     `SELECT d.clave, d.nombre_comercial, d.info_rfc, d.rfc_empresa, d.correo,
       d.calle, d.numero, d.interior, d.colonia, d.cp, d.fecha_registro,
       d.visible, d.concluido, d.aprobado, d.renovar, d.cadena_aprobacion, a.cedula_ret,
-      (d.fecha_registro IS NOT NULL AND DATEDIFF(CURRENT_DATE(), DATE(d.fecha_registro)) > 1095
+      (COALESCE(u.fecha_renovacion, d.fecha_registro) IS NOT NULL
+       AND DATEDIFF(CURRENT_DATE(), DATE(COALESCE(u.fecha_renovacion, d.fecha_registro))) > 1095
        AND COALESCE(d.renovar, 0) = 0) AS es_vencido,
       g.giro, m.municipio, u.email AS cuenta_email, u.fecha_renovacion
      FROM ret_datos_generales d
@@ -698,11 +699,11 @@ app.post("/api/admin/tramites/:clave/vencido", requireAdmin, async (req, res, ne
   if (!/^RET[A-Z0-9-]{4,40}$/.test(clave)) return res.status(400).json({ success: false, message: "La clave RET no es válida" });
   try {
     const [result] = await pool.execute(
-      `UPDATE ret_datos_generales
+      `UPDATE ret_datos_generales AS d
        SET visible = 0, concluido = 0, aprobado = 0
-       WHERE clave = ? AND visible = 1 AND fecha_registro IS NOT NULL
-         AND DATEDIFF(CURRENT_DATE(), DATE(fecha_registro)) > 1095
-         AND COALESCE(renovar, 0) = 0`,
+       WHERE d.clave = ? AND d.visible = 1 AND ${validityBaseDate("d")} IS NOT NULL
+         AND DATEDIFF(CURRENT_DATE(), DATE(${validityBaseDate("d")})) > 1095
+         AND COALESCE(d.renovar, 0) = 0`,
       [clave],
     );
     if (!result.affectedRows) return res.status(409).json({ success: false, message: "El trámite no cumple las condiciones para enviarse a Vencidos" });

@@ -1,7 +1,14 @@
+const validityBaseDate = (alias = "d") => `COALESCE(
+  (SELECT MAX(ret_user_status.fecha_renovacion)
+   FROM ret_usr ret_user_status
+   WHERE ret_user_status.id = ${alias}.clave),
+  ${alias}.fecha_registro
+)`;
+
 const renewalCondition = (alias = "d") => `(
   COALESCE(${alias}.renovar, 0) = 1
-  OR (${alias}.fecha_registro IS NOT NULL
-    AND DATEDIFF(CURRENT_DATE(), DATE(${alias}.fecha_registro)) > 1095)
+  OR (${validityBaseDate(alias)} IS NOT NULL
+    AND DATEDIFF(CURRENT_DATE(), DATE(${validityBaseDate(alias)})) > 1095)
 )`;
 
 const approvedCondition = (alias = "d") => `(
@@ -39,6 +46,7 @@ const statusCase = (alias = "d") => `CASE
 END`;
 
 module.exports = {
+  validityBaseDate,
   renewalCondition,
   approvedCondition,
   approvedRegistryCondition,
