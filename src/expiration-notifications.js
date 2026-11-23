@@ -27,7 +27,7 @@ const ensureNotificationTable = () => pool.query(`
 `);
 
 async function processExpirationNotifications() {
-  const noticeDays = boundedInteger(process.env.RENEWAL_NOTICE_DAYS, 30, 1, 180);
+  const noticeDays = boundedInteger(process.env.RENEWAL_NOTICE_DAYS, 45, 1, 180);
   await ensureNotificationTable();
   const [records] = await pool.execute(`
     SELECT d.clave, d.nombre_comercial,
@@ -54,6 +54,10 @@ async function processExpirationNotifications() {
   let failed = 0;
   for (const record of records) {
     const expirationKey = record.fecha_vencimiento_iso;
+    await pool.execute(
+      "UPDATE ret_usr SET edicion = 1 WHERE id = ? AND activo = 1",
+      [record.clave],
+    );
     const [reservation] = await pool.execute(
       `INSERT IGNORE INTO ret_notificaciones_correo
         (clave, tipo, fecha_referencia, destinatario, estado, intentos)

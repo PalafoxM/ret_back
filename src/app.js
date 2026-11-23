@@ -197,6 +197,12 @@ const requireEditableUser = async (req, res, next) => {
     if (Number(record.aprobado) === 1 && Number(record.edicion) !== 1) {
       return res.status(403).json({ success: false, message: "La edición de este registro requiere autorización administrativa" });
     }
+    if (Number(record.aprobado) === 1 && Number(record.edicion) === 1) {
+      await pool.execute(
+        "UPDATE ret_datos_generales SET aprobado = 0, concluido = 0, renovar = 0 WHERE clave = ? AND aprobado = 1",
+        [req.auth.clave],
+      );
+    }
     req.editPermission = { enabled: Number(record.edicion) === 1, approved: Number(record.aprobado) === 1 };
     next();
   } catch (error) { next(error); }
@@ -528,9 +534,8 @@ app.post("/api/admin/tramites/:clave/aprobar", requireAdmin, async (req, res, ne
       `UPDATE ret_datos_generales SET concluido = 1, aprobado = 1, renovar = 0, cadena_aprobacion = ? WHERE clave = ?`,
       [approvalSeal, clave],
     );
-    if (isRenewalApproval) {
-      await connection.execute("UPDATE ret_usr SET fecha_renovacion = ? WHERE id = ?", [approvedAt, clave]);
-    }
+    if (isRenewalApproval) await connection.execute("UPDATE ret_usr SET fecha_renovacion = ?, edicion = 0 WHERE id = ?", [approvedAt, clave]);
+    else await connection.execute("UPDATE ret_usr SET edicion = 0 WHERE id = ?", [clave]);
     await connection.execute("UPDATE ret_archivo_legal SET cedula_ret = ? WHERE clave = ?", [uploadedCedulaKey, clave]);
     await connection.commit();
     let emailSent = false;

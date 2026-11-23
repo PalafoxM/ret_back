@@ -178,16 +178,16 @@ const sendExpirationReminder = async ({ to, clave, nombreComercial, expirationDa
   const safeClave = escapeHtml(clave);
   const safeExpirationDate = escapeHtml(expirationDate);
   const configuredUrl = String(process.env.PUBLIC_WEB_URL || "").trim();
-  const loginUrl = /^https?:\/\//i.test(configuredUrl) ? configuredUrl.replace(/\/$/, "") : "";
-  const loginText = loginUrl ? `\n\nConsulta tu registro en: ${loginUrl}` : "";
-  const loginButton = loginUrl
-    ? `<p style="margin:26px 0"><a href="${escapeHtml(loginUrl)}" style="display:inline-block;padding:13px 22px;border-radius:9px;background:#0878b9;color:#fff;text-decoration:none;font-weight:bold">Ingresar al sistema RET</a></p>`
-    : "";
+  const loginUrl = /^https?:\/\//i.test(configuredUrl)
+    ? `${configuredUrl.replace(/\/$/, "")}/`
+    : "https://registroestataldeturismo.guanajuato.gob.mx/";
+  const loginText = `\n\nIngresa en: ${loginUrl}`;
+  const loginButton = `<p style="margin:26px 0"><a href="${escapeHtml(loginUrl)}" style="display:inline-block;padding:13px 22px;border-radius:9px;background:#0878b9;color:#fff;text-decoration:none;font-weight:bold">Ingresar al sistema RET</a></p>`;
   return getTransporter().sendMail({
     from: process.env.MAIL_FROM || process.env.MAIL_USER,
     to,
     subject: "Cédula RET próxima a vencer",
-    text: `Hola ${nombreComercial || "establecimiento"},\n\nLa vigencia de la Cédula RET ${clave} concluye el ${expirationDate}. Faltan ${daysRemaining} días para su vencimiento.\n\nTe recomendamos mantener actualizados tus datos y estar pendiente del proceso de renovación.${loginText}`,
+    text: `Hola ${nombreComercial || "establecimiento"},\n\nLa vigencia de la Cédula RET ${clave} concluye el ${expirationDate}. Faltan ${daysRemaining} días para su vencimiento.\n\nYa puedes ingresar al sistema para actualizar tus datos generales, documentos y demás secciones de tu registro.${loginText}`,
     html: `
       <div style="margin:0;background:#edf8fb;padding:32px;font-family:Arial,sans-serif;color:#123d60">
         <div style="max-width:600px;margin:auto;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 12px 35px rgba(7,55,100,.16)">
@@ -195,7 +195,7 @@ const sendExpirationReminder = async ({ to, clave, nombreComercial, expirationDa
           <div style="padding:30px"><p style="margin-top:0">Hola <strong>${safeName}</strong>:</p>
             <p>La vigencia de la Cédula RET <strong>${safeClave}</strong> concluye el <strong>${safeExpirationDate}</strong>.</p>
             <div style="margin:22px 0;padding:18px;border-left:4px solid #f2a900;background:#fff7df"><strong>Faltan ${Number(daysRemaining)} días para su vencimiento.</strong></div>
-            <p>Te recomendamos mantener actualizados tus datos y estar pendiente del proceso de renovación.</p>
+            <p>Ya puedes ingresar al sistema para actualizar tus datos generales, documentos y demás secciones de tu registro.</p>
             ${loginButton}
             <p style="margin-bottom:0;font-size:13px;color:#617887">Este es un aviso automático del Registro Estatal de Turismo de Guanajuato.</p></div>
         </div>
