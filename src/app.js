@@ -1011,9 +1011,9 @@ app.post("/api/admin/usuarios/:id/password", requireAdmin, async (req, res, next
       return res.status(400).json({ success: false, message: "La contraseña debe tener entre 12 y 128 caracteres, mayúscula, minúscula, número y símbolo" });
     }
     const passwordHash = await bcrypt.hash(password, 12);
-    const [result] = await pool.execute("UPDATE ret_usr SET pass = ? WHERE id_usr = ?", [passwordHash, userId]);
+    const [result] = await pool.execute("UPDATE ret_usr SET pass = ?, activo = 1 WHERE id_usr = ?", [passwordHash, userId]);
     if (!result.affectedRows) return res.status(404).json({ success: false, message: "No se encontró el usuario" });
-    res.status(200).json({ success: true, message: "Contraseña actualizada correctamente" });
+    res.status(200).json({ success: true, message: "Contraseña actualizada y usuario activado correctamente" });
   } catch (error) { next(error); }
 });
 
