@@ -1041,11 +1041,6 @@ app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
       await connection.rollback();
       return res.status(404).json({ success: false, message: "La Clave RET y el correo electrónico no corresponden a la misma cuenta" });
     }
-    if (Number(user.activo) !== 1) {
-      await connection.rollback();
-      return res.status(403).json({ success: false, message: "No se puede enviar el correo porque el usuario no se encuentra activo. Favor de comunicarse con el administrador del sistema" });
-    }
-
     const temporaryPassword = generatePassword();
     const passwordHash = await bcrypt.hash(temporaryPassword, 12);
     await sendPasswordRecovery({
@@ -1054,9 +1049,11 @@ app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
       temporaryPassword,
       nombreComercial: user.nombre_comercial,
     });
-    await connection.execute("UPDATE ret_usr SET pass = ? WHERE id_usr = ?", [passwordHash, user.id_usr]);
+    await connection.execute("UPDATE ret_usr SET pass = ?, activo = 1 WHERE id_usr = ?", [passwordHash, user.id_usr]);
     await connection.commit();
-    return res.status(200).json({ success: true, message: "Las nuevas credenciales fueron enviadas al correo registrado" });
+    return res.status(200).json({ success: true, message: Number(user.activo) === 1
+      ? "Las nuevas credenciales fueron enviadas al correo registrado"
+      : "La cuenta fue reactivada y las nuevas credenciales fueron enviadas al correo registrado" });
   } catch (error) {
     if (connection) await connection.rollback();
     console.error("No fue posible procesar la recuperación de acceso:", error.code || error.message);
