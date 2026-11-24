@@ -1019,16 +1019,14 @@ app.post("/api/admin/usuarios/:id/password", requireAdmin, async (req, res, next
 
 app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
   const correo = String(req.body.email || req.body.correo || "").trim().toLowerCase();
+  const clave = String(req.body.clave || "").trim().toUpperCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo) || correo.length > 254) {
     return res.status(400).json({ success: false, message: "Ingresa un correo electrónico válido" });
   }
+  if (!/^RET\d{6,14}$/.test(clave)) {
+    return res.status(400).json({ success: false, message: "Ingresa una Clave RET válida" });
+  }
 
-  const genericResponse = {
-    success: true,
-    message: "Si el correo está registrado y activo, recibirás nuevas credenciales de acceso",
-  };
-  const temporaryPassword = generatePassword();
-  const passwordHash = await bcrypt.hash(temporaryPassword, 12);
   let connection;
   try {
     connection = await pool.getConnection();
@@ -1036,14 +1034,20 @@ app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
     const [[user]] = await connection.execute(
       `SELECT u.id_usr, u.id AS clave, u.email, u.activo, d.nombre_comercial
        FROM ret_usr u LEFT JOIN ret_datos_generales d ON d.clave = u.id
-       WHERE LOWER(u.email) = ? LIMIT 1 FOR UPDATE`,
-      [correo],
+       WHERE u.id = ? AND LOWER(u.email) = ? LIMIT 1 FOR UPDATE`,
+      [clave, correo],
     );
-    if (!user || Number(user.activo) !== 1) {
+    if (!user) {
       await connection.rollback();
-      return res.status(200).json(genericResponse);
+      return res.status(404).json({ success: false, message: "La Clave RET y el correo electrónico no corresponden a la misma cuenta" });
+    }
+    if (Number(user.activo) !== 1) {
+      await connection.rollback();
+      return res.status(403).json({ success: false, message: "No se puede enviar el correo porque el usuario no se encuentra activo. Favor de comunicarse con el administrador del sistema" });
     }
 
+    const temporaryPassword = generatePassword();
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
     await sendPasswordRecovery({
       to: user.email,
       clave: user.clave,
@@ -1052,11 +1056,11 @@ app.post("/api/auth/recuperar-password", recoveryLimiter, async (req, res) => {
     });
     await connection.execute("UPDATE ret_usr SET pass = ? WHERE id_usr = ?", [passwordHash, user.id_usr]);
     await connection.commit();
-    return res.status(200).json(genericResponse);
+    return res.status(200).json({ success: true, message: "Las nuevas credenciales fueron enviadas al correo registrado" });
   } catch (error) {
     if (connection) await connection.rollback();
     console.error("No fue posible procesar la recuperación de acceso:", error.code || error.message);
-    return res.status(200).json(genericResponse);
+    return res.status(503).json({ success: false, message: "No fue posible enviar el correo de recuperación. Intenta nuevamente más tarde" });
   } finally {
     if (connection) connection.release();
   }
